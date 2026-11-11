@@ -29,7 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      # CLI + MCP server only — matches the Linux/macOS release build
+      # CLI + MCP server only — the macOS release build; the Linux and
+      # Windows release builds (default features, viewer included) are
+      # compiled by the build matrix below
       - run: cargo check --release --no-default-features
 
   clippy:
@@ -58,14 +60,45 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release --no-default-features
-      - run: cargo build --release --no-default-features
+      # build what the release ships: macOS the CLI + MCP server, Linux and
+      # Windows the viewer build — one binary with the GUI, the CLI and the
+      # MCP server, exactly the binaries the release attaches
+      - if: matrix.os == 'macos-latest'
+        run: cargo build --release --no-default-features
+      - if: matrix.os != 'macos-latest'
+        run: cargo build --release
       - uses: actions/upload-artifact@v7
         with:
-          name: apkscope-cli-${{ matrix.name }}
+          name: apkscope-${{ matrix.name }}
           path: |
             target/release/apkscope
             target/release/apkscope.exe
           if-no-files-found: ignore
-      # the viewer builds on Windows (where it is tested)
-      - if: matrix.os == 'windows-latest'
-        run: cargo build --release
+      # the static CLI + MCP server on Linux, like the release: for servers,
+      # containers and musl distros (Alpine) — no viewer, and it says so when
+      # asked (a static binary cannot dlopen() the desktop's X11/Wayland/GL)
+      - if: matrix.os == 'ubuntu-24.04'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - if: matrix.os == 'ubuntu-24.04'
+        run: sudo apt-get install -y musl-tools
+      - if: matrix.os == 'ubuntu-24.04'
+        run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      # the Linux binaries, packaged like the release (.deb + AppImage); pinned
+      # to 24.04 because the glibc build links glibc dynamically — building on
+      # the oldest supported LTS keeps it installable everywhere.
+      - if: matrix.os == 'ubuntu-24.04'
+        run: |
+          mkdir -p dist
+          cp target/release/apkscope dist/apkscope_linux_x86_64
+          cp target/x86_64-unknown-linux-musl/release/apkscope dist/apkscope_linux_musl_x86_64
+          packaging/linux/package.sh target/release/apkscope dist
+      - if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@v7
+        with:
+          name: apkscope-packages-linux-x64
+          path: dist/

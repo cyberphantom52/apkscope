@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=apkscope
+GenericName=APK inspector
+Comment=Open any Android app and see what it really does
+Exec=apkscope %f
+Icon=apkscope
+Terminal=false
+Categories=Development;Security;Utility;
+Keywords=android;apk;decompile;xref;security;reverse-engineering;
+MimeType=application/vnd.android.package-archive;
+StartupWMClass=apkscope

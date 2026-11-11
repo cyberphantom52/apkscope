@@ -1,0 +1,6 @@
+#!/bin/sh
+# AppImage entry point. The bundled binary dlopen()s the desktop's X11/Wayland/GL
+# stack at runtime (nothing is bundled), so the image stays small and always uses
+# the native drivers.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/apkscope" "$@"

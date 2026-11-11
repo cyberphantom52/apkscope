@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.suffixing.apkscope</id>
+  <name>apkscope</name>
+  <summary>Android APK decompiler, xref engine and MCP server for AI agents</summary>
+  <description>
+    <p>
+      apkscope opens any Android app and shows what it really does: readable
+      Java decompilation, an xref and API-recon engine, Gradle export, APK
+      re-signing and a native viewer, in one small binary.
+    </p>
+    <p>
+      The viewer uses the desktop's X11 or Wayland stack; file dialogs go
+      through xdg-desktop-portal. The same binary also provides a CLI and an
+      MCP server for AI agents.
+    </p>
+  </description>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <url type="homepage">https://github.com/suffixing/apkscope</url>
+  <url type="bugtracker">https://github.com/suffixing/apkscope/issues</url>
+  <launchable type="desktop-id">io.github.suffixing.apkscope.desktop</launchable>
+  <developer id="io.github.suffixing">
+    <name>suffixing</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="__VERSION__" date="__DATE__"/>
+  </releases>
+</component>

@@ -87,7 +87,26 @@ case "$arch" in
   *) die "unsupported CPU architecture '$arch'" ;;
 esac
 
+# The Linux binaries are glibc builds with the viewer; a musl libc (Alpine,
+# Void musl, ...) cannot load them. There the installer takes the static
+# CLI + MCP binary instead — which has no viewer: a fully static binary
+# cannot dlopen() the desktop's X11/Wayland/GL libraries, so no window is
+# possible on musl. Say so up front instead of installing a binary that
+# would fail to start.
+if [ "$os" = linux ]; then
+  case "$(ldd --version 2>&1 | head -n1)" in
+    *musl*) is_musl=1 ;;
+    *) if [ -e "/lib/ld-musl-$arch.so.1" ]; then is_musl=1; else is_musl=0; fi ;;
+  esac
+else
+  is_musl=0
+fi
+
 asset="apkscope_${os}_${arch}"
+if [ "$is_musl" -eq 1 ]; then
+  asset="apkscope_${os}_musl_${arch}"
+  note "musl libc detected: installing the static CLI + MCP build (apkscope_linux_musl_${arch}) — it has no viewer (a fully static binary cannot load the desktop's X11/Wayland/GL libraries); the glibc binary and the .deb/AppImage packages have it"
+fi
 
 # --- resolve the download URL ---------------------------------------------------
 if [ -n "$VERSION" ]; then

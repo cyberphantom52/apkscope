@@ -2,8 +2,13 @@ name: release
 
 # Builds every platform when a version tag (v*) is pushed and attaches the
 # binaries to a GitHub Release. "-" in the tag name (e.g. v0.9.1-rc.1)
-# publishes as a pre-release. Linux binaries are static musl builds; the
-# lint job gates the matrix so a broken tag wastes no compute.
+# publishes as a pre-release. Linux ships two binaries per arch: the glibc
+# build with the viewer, the CLI and the MCP server together (also packaged
+# as .deb and AppImage), and the static musl CLI + MCP server for servers,
+# containers and Alpine — no viewer there, a fully static binary cannot
+# dlopen() the desktop's X11/Wayland/GL stack, and the binary says so when
+# asked. Windows ships the viewer exe, macOS the CLI + MCP build. The lint
+# job gates the matrix so a broken tag wastes no compute.
 on:
   push:
     tags:
@@ -12,15 +17,20 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # checks both feature configs now; the viewer tree adds a few minutes
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      # CLI + MCP server only — matches the Linux/macOS release build
+      # CLI + MCP server only — the macOS release build
       - run: cargo check --release --no-default-features
+      # the default-feature build — what Linux and Windows releases ship
+      # (viewer + CLI + MCP server in one binary); compiles with no system GUI
+      # packages, since the desktop's X11/Wayland/GL are dlopen()'d at runtime
+      - run: cargo check --release
       - run: cargo clippy --release --no-default-features -- -D warnings
 
   linux-x86_64:
@@ -32,14 +42,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
+      # the desktop binary, like the Windows exe: viewer + CLI + MCP server
+      # in one. It links nothing beyond libc — X11, Wayland and GL are
+      # dlopen()'d at runtime — and 24.04 is the oldest supported LTS, so
+      # the glibc it needs is the floor every newer distro meets.
+      - run: cargo build --release
+      - run: |
+          mkdir -p dist
+          cp target/release/apkscope dist/apkscope_linux_x86_64
+      # the same binary, packaged: .deb for Debian/Ubuntu, AppImage for any distro
+      - run: packaging/linux/package.sh target/release/apkscope dist
+      # the CLI + MCP server for servers, containers and musl distros (Alpine):
+      # fully static. No viewer — a static binary cannot dlopen() the desktop's
+      # X11/Wayland/GL stack — and asking it for the gui prints that limitation
+      # instead of a bare error.
       - run: sudo apt-get install -y musl-tools
       - run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-      - run: |
-          mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/apkscope dist/apkscope_linux_x86_64
+      - run: cp target/x86_64-unknown-linux-musl/release/apkscope dist/apkscope_linux_musl_x86_64
       - uses: actions/upload-artifact@v7
         with:
           name: dist-linux-x86_64
@@ -54,14 +76,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
+      # the desktop binary, like the Windows exe: viewer + CLI + MCP server
+      # in one. It links nothing beyond libc — X11, Wayland and GL are
+      # dlopen()'d at runtime — and 24.04 is the oldest supported LTS, so
+      # the glibc it needs is the floor every newer distro meets.
+      - run: cargo build --release
+      - run: |
+          mkdir -p dist
+          cp target/release/apkscope dist/apkscope_linux_aarch64
+      # the same binary, packaged: .deb for Debian/Ubuntu, AppImage for any distro
+      - run: packaging/linux/package.sh target/release/apkscope dist
+      # the CLI + MCP server for servers, containers and musl distros (Alpine):
+      # fully static. No viewer — a static binary cannot dlopen() the desktop's
+      # X11/Wayland/GL stack — and asking it for the gui prints that limitation
+      # instead of a bare error.
       - run: sudo apt-get install -y musl-tools
       - run: cargo build --release --no-default-features --target aarch64-unknown-linux-musl
         env:
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-      - run: |
-          mkdir -p dist
-          cp target/aarch64-unknown-linux-musl/release/apkscope dist/apkscope_linux_aarch64
+      - run: cp target/aarch64-unknown-linux-musl/release/apkscope dist/apkscope_linux_musl_aarch64
       - uses: actions/upload-artifact@v7
         with:
           name: dist-linux-aarch64
@@ -90,7 +124,7 @@ jobs:
 
   windows:
     needs: [lint]
-    # the GUI viewer, built where it is tested
+    # one binary — viewer + CLI + MCP server — built where it is tested
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -120,12 +154,12 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum apkscope_* > checksums.txt
+          sha256sum apkscope* > checksums.txt
           cat checksums.txt
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3.0.4
         with:
           files: |
-            dist/apkscope_*
+            dist/apkscope*
             dist/checksums.txt
           generate_release_notes: true
           fail_on_unmatched_files: true

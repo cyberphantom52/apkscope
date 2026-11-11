@@ -903,8 +903,27 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
 
 #[cfg(not(feature = "gui"))]
 mod gui {
+    /// Printed when this build is asked for a window it cannot open. The
+    /// static Linux build (musl) is compiled without the viewer on purpose:
+    /// a fully static binary cannot dlopen() the desktop's X11/Wayland/GL
+    /// libraries, so no window is possible there. Spell the limitation out
+    /// and point at the builds that ship the viewer.
+    pub fn no_viewer_note() {
+        eprintln!(
+            "apkscope: no viewer in this build (compiled without the `gui` feature).\n\
+             On Linux this is the static musl binary (apkscope_linux_musl_x86_64/aarch64),\n\
+             for servers, containers and musl distros: a fully static binary cannot load\n\
+             the desktop's X11/Wayland/GL libraries at runtime, so it cannot open a\n\
+             window. The viewer ships in the Windows exe, the glibc Linux binaries\n\
+             (apkscope_linux_x86_64/aarch64) and the .deb/AppImage packages; on macOS,\n\
+             build from source with `cargo build --release`.\n\
+             Every other command works - see `apkscope --help` for the list."
+        );
+    }
+
     pub fn run(_: Option<&str>, _: bool) -> Result<(), String> {
-        Err("this is the CLI-only build (no viewer); every other command works. Build with the default `gui` feature for the window.".into())
+        no_viewer_note();
+        Err("the viewer is not available in this build".into())
     }
 }
 
@@ -948,6 +967,15 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // No command given and this build has no viewer: nothing can open, so
+    // explain the limitation and show what this build can do instead of
+    // failing on a stub. (The viewer build opens its window here.)
+    #[cfg(not(feature = "gui"))]
+    if args.len() < 2 {
+        gui::no_viewer_note();
+        eprintln!();
+        return usage();
+    }
     let rest: Vec<String> = args.get(2..).unwrap_or_default().to_vec();
     let result = match args.get(1..).unwrap_or_default() {
         [cmd, ..] if cmd == "classes" || cmd == "listclass" => (|| {
