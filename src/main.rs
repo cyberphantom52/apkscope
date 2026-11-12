@@ -1,7 +1,3 @@
-mod apksign;
-mod arsc;
-mod axml;
-mod bytecode;
 mod cache;
 mod cfg;
 mod deobf;
@@ -20,11 +16,11 @@ mod mcp;
 mod opt;
 mod quick;
 mod re;
-mod rebuild;
-mod res;
 mod session;
-mod sign;
-mod smali;
+
+// the editing core is its own crate, usable as a library
+use apkscope_core::dex::render;
+use apkscope_core::{apksign, arsc, axml, bytecode, rebuild, res, sign, smali};
 
 use std::fmt::Write as _;
 use std::{
@@ -596,51 +592,6 @@ fn decompile(path: &str, class: Option<&str>, deobf: bool) -> Result<(), String>
         Some(c) if !found => Err(format!("class {c} not found")),
         _ => Ok(()),
     }
-}
-
-fn render(dex: &dex::Dex, i: &bytecode::Insn) -> Result<String, String> {
-    use bytecode::{Fmt::*, Ref};
-    let (name, f, r) = bytecode::info(i.op).unwrap();
-    let mut parts = Vec::new();
-    let regs: Vec<String> = if i.range {
-        (0..i.nregs as u16)
-            .map(|k| format!("v{}", i.regs[0] + k))
-            .collect()
-    } else {
-        i.regs[..i.nregs as usize]
-            .iter()
-            .map(|r| format!("v{r}"))
-            .collect()
-    };
-    if matches!(f, F35c | F3rc | F45cc | F4rcc) {
-        parts.push(format!("{{{}}}", regs.join(", ")));
-    } else {
-        parts.extend(regs);
-    }
-    match f {
-        F10t | F20t | F30t | F21t | F22t | F31t => {
-            parts.push(format!("{:04x}", i.off as i64 + i.lit))
-        }
-        F11n | F21s | F21h | F31i | F51l | F22b | F22s => parts.push(format!("#{}", i.lit)),
-        _ => {}
-    }
-    match r {
-        Ref::None => {}
-        Ref::String => parts.push(format!("{:?}", dex.string(i.idx)?)),
-        Ref::Type => parts.push(dex.type_name(i.idx)?),
-        Ref::Field => parts.push(dex.field_ref(i.idx)?),
-        Ref::Method => parts.push(dex.method_ref(i.idx)?),
-        Ref::Proto => parts.push(dex.proto(i.idx)?),
-        // shortcut: call sites / method handles shown by index, resolve when lambdas get decompiled
-        Ref::CallSite => parts.push(format!("call_site@{}", i.idx)),
-        Ref::MethodHandle => parts.push(format!("method_handle@{}", i.idx)),
-    }
-    if matches!(f, F45cc | F4rcc) {
-        parts.push(dex.proto(i.idx2)?);
-    }
-    Ok(format!("{name} {}", parts.join(", "))
-        .trim_end()
-        .to_string())
 }
 
 /// Structuring recurses per nesting level; deep methods need more than Windows' 1 MB main stack.

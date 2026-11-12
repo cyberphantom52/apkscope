@@ -623,7 +623,7 @@ mod tests {
             if !std::path::Path::new(apk).exists() {
                 continue;
             }
-            let mut a = crate::export::open(apk).unwrap();
+            let mut a = crate::apk::open(apk).unwrap();
             let table = crate::res::parse_table(&a.read("resources.arsc").unwrap()).unwrap();
             let names = crate::res::Names::new(&table);
             let bin = a.read("AndroidManifest.xml").unwrap();
