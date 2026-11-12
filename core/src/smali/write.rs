@@ -197,10 +197,10 @@ impl Collect {
                         }
                         i.proto.iter().for_each(|p| self.proto(p));
                     }
-                    Item::Local { name, ty, sig, .. } => [name, ty, sig]
-                        .into_iter()
-                        .flatten()
-                        .for_each(|x| self.str(x)),
+                    Item::Local { name, ty, sig, .. } => {
+                        [name, sig].into_iter().flatten().for_each(|x| self.str(x));
+                        ty.iter().for_each(|t| self.ty(t));
+                    }
                     Item::SetFile(Some(x)) => self.str(x),
                     _ => {}
                 }
@@ -1282,7 +1282,7 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
                         o.push(if sig.is_some() { 4 } else { 3 });
                         uleb(o, *reg as u32);
                         uleb(o, p.p1(name));
-                        uleb(o, p.p1(ty));
+                        uleb(o, ty.as_ref().map_or(0, |t| p.ti[t] + 1));
                         if sig.is_some() {
                             uleb(o, p.p1(sig));
                         }
