@@ -23,7 +23,7 @@ const MAX_WORKERS: usize = 4;
 const IDLE_SECS: u64 = 600;
 
 fn tools() -> Value {
-    let apk = json!({"type": "string", "description": "Absolute path to the .apk, .apks, .xapk or .dex file"});
+    let apk = json!({"type": "string", "description": "Absolute path to the .apk, .jar, .apks, .xapk or .dex file"});
     let page = |props: Value| {
         let mut p = props;
         p["limit"] = json!({"type": "integer", "description": "At most this many results"});

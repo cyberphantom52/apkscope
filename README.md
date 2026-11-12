@@ -295,7 +295,7 @@ apkscope smali     app.apk com.example.Api > Api.smali          # one class as e
 apkscope build     app.apk out.apk --smali Api.smali            # assemble it back in, rebuild, sign
 ```
 
-`--json`, `--limit N`, `--offset N` work everywhere. Takes `.apk`, `.apks`, `.xapk`, `.dex`.
+`--json`, `--limit N`, `--offset N` work everywhere. Takes `.apk`, `.jar` (Android framework JARs), `.apks`, `.xapk`, `.dex`.
 `apkscope --help` lists everything.
 
 <details>

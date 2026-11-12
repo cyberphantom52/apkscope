@@ -70,7 +70,8 @@ Reverse engineering (Class = a.b.C, member = a.b.C#field or a.b.C#method()):
   apkscope map <apk> export <out.jobf|out.mapping>  |  map <apk> import <file>   JADX / Enigma names
 Editing: apkscope smali <apk> <Class>      editable smali of one class (edit, then build --smali)
          apkscope build <in.apk> <out.apk> [--put name=file]... [--delete name]... [--manifest x.xml]
-                  [--string name[@config]=value]... [--smali edited.smali]... [--key k.pk8 --cert c.crt]
+                  [--string name[@config]=value]... [--smali edited.smali]...
+                  [--key k.pk8 --cert c.crt | --no-sign]   a .jar is never signed
          apkscope verify <apk>
 Agents:  apkscope mcp                      MCP server over stdio (see README)
 Other:   apkscope disasm <apk> [Class]     apkscope gui [apk]
@@ -752,11 +753,13 @@ fn search_cmd(args: &[String], deobf: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// `apkscope build`: apply edits, zipalign, sign v2 + v3, then verify the result.
+/// `apkscope build`: apply edits, zipalign, sign v2 + v3, then verify the result. `--no-sign`
+/// leaves the APK unsigned; a JAR never is signed, Android does not verify one.
 fn build_cmd(args: &[String]) -> Result<(), String> {
     let mut pos = Vec::new();
     let mut edits = rebuild::Edits::new();
     let (mut key, mut cert, mut manifest) = (None, None, None);
+    let mut sign = true;
     let mut strings = std::collections::BTreeMap::new();
     let mut smali_srcs: Vec<String> = Vec::new();
     let mut it = args.iter();
@@ -773,6 +776,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
             "--delete" => {
                 edits.insert(it.next().ok_or("--delete needs a name")?.clone(), None);
             }
+            "--no-sign" => sign = false,
             "--string" => {
                 let v = it.next().ok_or("--string needs name=value")?;
                 let (k, text) = v.split_once('=').ok_or("--string needs name=value")?;
@@ -794,12 +798,20 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     let [input, output] = pos.as_slice() else {
         return Err("usage: apkscope build <in.apk> <out.apk> [options]".into());
     };
+    let jar = input.to_lowercase().ends_with(".jar");
+    if (jar || !sign) && (key.is_some() || cert.is_some()) {
+        return Err("--key and --cert sign an APK: not a .jar, and not with --no-sign".into());
+    }
     let key = match (key, cert) {
-        (Some(k), Some(c)) => apksign::load(std::path::Path::new(&k), std::path::Path::new(&c))?,
+        _ if jar || !sign => None,
+        (Some(k), Some(c)) => Some(apksign::load(
+            std::path::Path::new(&k),
+            std::path::Path::new(&c),
+        )?),
         (None, None) => {
             let (k, dir) = apksign::default_key()?;
             eprintln!("signing with apkscope's key in {}", dir.display());
-            k
+            Some(k)
         }
         _ => return Err("--key and --cert go together".into()),
     };
@@ -838,7 +850,10 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         );
     }
     let (apk, cd) = rebuild::rebuild(&src, &edits)?;
-    let signed = apksign::sign(apk, cd, &key)?;
+    let signed = match &key {
+        Some(key) => apksign::sign(apk, cd, key)?,
+        None => apk,
+    };
     std::fs::write(output, &signed).map_err(|e| format!("{output}: {e}"))?;
     eprintln!(
         "wrote {output} ({} bytes, {} edits) in {:.1}s",
@@ -846,8 +861,10 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         edits.len(),
         t.elapsed().as_secs_f64()
     );
-    for l in apksign::verify(output)? {
-        eprintln!("{l}");
+    if key.is_some() {
+        for l in apksign::verify(output)? {
+            eprintln!("{l}");
+        }
     }
     Ok(())
 }
