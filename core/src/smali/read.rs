@@ -30,6 +30,8 @@ pub struct Reader<'a> {
     call_sites: Vec<Arc<Vec<Value>>>,
     class_defs: usize,
     class_count: usize,
+    /// hiddenapi_class_data section, 0 when the file has none
+    hidden: usize,
 }
 
 /// Every class of a DEX file, in class_def order.
@@ -130,6 +132,7 @@ impl<'a> Reader<'a> {
             call_sites: vec![],
             class_defs,
             class_count,
+            hidden: 0,
         };
         // call sites and method handles are only listed in the map
         let map = u32_at(d, 0x34)? as usize;
@@ -150,6 +153,7 @@ impl<'a> Reader<'a> {
                     (sections.2, sections.3) =
                         (u32_at(d, o + 4)? as usize, u32_at(d, o + 8)? as usize)
                 }
+                0xf000 => r.hidden = u32_at(d, o + 8)? as usize,
                 _ => {}
             }
         }
@@ -399,6 +403,22 @@ impl<'a> Reader<'a> {
         }
         .into_iter();
 
+        // hiddenapi flags: one uleb128 per member, in class_data order
+        let mut hid = match self.hidden {
+            0 => 0,
+            h => match u32_at(d, h + 4 + i * 4)? as usize {
+                0 => 0,
+                rel => h + rel,
+            },
+        };
+        let mut hidden = || -> R<Option<u32>> {
+            if hid == 0 {
+                Ok(None)
+            } else {
+                uleb128(d, &mut hid).map(Some)
+            }
+        };
+
         let mut off = u32_at(d, o + 24)? as usize;
         if off != 0 {
             let counts = [
@@ -418,6 +438,7 @@ impl<'a> Reader<'a> {
                         name: f.name.clone(),
                         ty: f.ty.clone(),
                         access,
+                        hidden: hidden()?,
                         init,
                         annos: fa.remove(&idx).unwrap_or_default(),
                     });
@@ -434,6 +455,7 @@ impl<'a> Reader<'a> {
                         name: m.name.clone(),
                         proto: m.proto.clone(),
                         access,
+                        hidden: hidden()?,
                         code: None,
                         annos: ma.remove(&idx).unwrap_or_default(),
                         param_annos: None,
