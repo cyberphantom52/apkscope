@@ -653,7 +653,11 @@ impl<'a> Reader<'a> {
                     3 | 4 => {
                         let reg = uleb128(d, &mut o)? as u16;
                         let name = self.p1(&mut o)?;
-                        let ty = self.p1(&mut o)?;
+                        // the type is an index into type_ids, not string_ids
+                        let ty = match uleb128(d, &mut o)? {
+                            0 => None,
+                            v => Some(self.ty(v - 1)?),
+                        };
                         let sig = if op == 4 { self.p1(&mut o)? } else { None };
                         Item::Local { reg, name, ty, sig }
                     }

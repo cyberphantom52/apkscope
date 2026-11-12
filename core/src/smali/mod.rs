@@ -350,6 +350,28 @@ mod tests {
     }
 
     #[test]
+    fn local_type_is_a_type_index() {
+        let src = ".class LA;\n.super Ljava/lang/Object;\n.method static f()V\n    .locals 1\n    const/4 v0, 0x0\n    .local v0, \"s\":Ljava/lang/String;\n    return-void\n.end method\n";
+        let c = text::parse(src).unwrap();
+        let d = write::write(std::slice::from_ref(&c), *b"035").unwrap();
+        assert_eq!(read::read(&d).unwrap(), [c]);
+        let at = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap()) as usize;
+        // the one code item's debug info: line start, no parameters, advance pc, start local
+        let map = at(0x34);
+        let code = (0..at(map))
+            .map(|k| map + 4 + k * 12)
+            .find(|&o| d[o..o + 2] == [0x01, 0x20])
+            .map(|o| at(o + 8))
+            .unwrap();
+        let debug = at(code + 8);
+        assert_eq!(d[debug + 1..debug + 6], [0, 1, 1, 3, 0]);
+        // DBG_START_LOCAL names its type by type index (plus one), not by string index
+        let ty = d[debug + 7] as usize - 1;
+        let string = at(at(0x3c) + at(at(0x44) + ty * 4) * 4);
+        assert_eq!(&d[string + 1..string + 19], b"Ljava/lang/String;");
+    }
+
+    #[test]
     fn reports_errors_with_line() {
         let e = text::parse(".class LA;\n.super Ljava/lang/Object;\n.method static f()V\n    .locals 0\n    bogus-op v0\n.end method\n").unwrap_err();
         assert!(e.starts_with("line 5:"), "{e}");
