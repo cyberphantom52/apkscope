@@ -706,13 +706,7 @@ fn zip_crate_dir(
     Ok(out)
 }
 
-/// `com.a.B`, `com/a/B` or `Lcom/a/B;` -> `Lcom/a/B;`
-pub fn descriptor(name: &str) -> String {
-    if name.starts_with('L') && name.ends_with(';') {
-        return name.to_string();
-    }
-    format!("L{};", name.replace('.', "/"))
-}
+pub use apkscope_core::dex::descriptor;
 
 /// Package of the manifest, from the APK; empty if it can't be read.
 pub fn package(path: &str) -> String {

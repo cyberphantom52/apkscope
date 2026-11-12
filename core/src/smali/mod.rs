@@ -16,7 +16,7 @@ pub fn version(dex: &[u8]) -> [u8; 3] {
 use model::Class;
 
 /// `classesN.dex` entries, in load order (classes.dex, classes2.dex, ...).
-fn dex_entries(apk: &crate::export::Apk) -> Vec<String> {
+fn dex_entries(apk: &crate::apk::Apk) -> Vec<String> {
     let mut v: Vec<String> = apk
         .zip
         .file_names()
@@ -29,8 +29,8 @@ fn dex_entries(apk: &crate::export::Apk) -> Vec<String> {
 
 /// Round-trippable Smali of one class (dotted or `L..;` name), for editing then re-assembling.
 pub fn export_class(path: &str, class: &str) -> Result<String, String> {
-    let desc = crate::quick::descriptor(class);
-    let mut apk = crate::export::open(path)?;
+    let desc = crate::dex::descriptor(class);
+    let mut apk = crate::apk::open(path)?;
     for name in dex_entries(&apk) {
         let Some(bytes) = apk.read(&name) else {
             continue;
@@ -57,7 +57,7 @@ pub fn inject(
         .iter()
         .map(|s| text::parse(s))
         .collect::<Result<_, _>>()?;
-    let mut apk = crate::export::open(path)?;
+    let mut apk = crate::apk::open(path)?;
     let entries = dex_entries(&apk);
     // group each edited class under the dex entry it belongs to
     let mut by_dex: std::collections::BTreeMap<String, Vec<Class>> = Default::default();
@@ -251,7 +251,7 @@ mod tests {
                         c.tries.len()
                     ));
                     for i in crate::bytecode::decode(c.insns).unwrap() {
-                        v.push(crate::render(d, &i).unwrap_or_else(|e| e));
+                        v.push(crate::dex::render(d, &i).unwrap_or_else(|e| e));
                     }
                 }
             }

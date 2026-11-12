@@ -391,7 +391,8 @@ pub fn verify(path: &str) -> Result<Vec<String>, String> {
     let eocd = eocd_at(&apk)?;
     let cd = u32::from_le_bytes(apk[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
     let Some(block) = crate::sign::signing_block(path) else {
-        let v1 = crate::quick::read_entry(path, "META-INF/MANIFEST.MF")?.is_some();
+        let v1 = zip::ZipArchive::new(std::io::Cursor::new(&apk))
+            .is_ok_and(|mut z| z.by_name("META-INF/MANIFEST.MF").is_ok());
         return Ok(vec![
             if v1 {
                 "v1 (JAR) signature only: v2/v3 not present, v1 not checked here"

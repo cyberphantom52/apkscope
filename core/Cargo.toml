@@ -1,0 +1,16 @@
+[package]
+name = "apkscope-core"
+version = "0.9.2"
+edition = "2024"
+description = "The editing core of apkscope as a library: DEX and Smali round trip, resources, APK rebuild and signing"
+license = "Apache-2.0"
+repository = "https://github.com/suffixing/apkscope"
+
+[dependencies]
+crc32fast = "1"
+miniz_oxide = "0.8"
+rand = "0.8"
+rsa = { version = "0.9", features = ["sha2"] }
+sha1 = "0.10"
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate"] }
