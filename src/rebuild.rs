@@ -20,6 +20,8 @@ struct Entry {
     offset: u32,
 }
 
+const MANIFEST: &str = "META-INF/MANIFEST.MF";
+
 /// v1 (JAR) signature files: stale once the APK changes, and replaced by v2/v3
 pub fn is_v1_signature(name: &str) -> bool {
     let up = name.to_uppercase();
@@ -112,10 +114,16 @@ pub fn rebuild(src: &str, edits: &Edits) -> Result<(Vec<u8>, usize), String> {
     let mut out = Vec::with_capacity(std::fs::metadata(src).map_or(0, |m| m.len() as usize));
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // a manifest without signature files beside it is a plain JAR's, not a v1 signature
+    let v1_signed = zip
+        .file_names()
+        .flatten()
+        .any(|n| is_v1_signature(&n) && !n.eq_ignore_ascii_case(MANIFEST));
     for i in 0..zip.len() {
         let mut e = zip.by_index_raw(i).map_err(|e| e.to_string())?;
         let name = e.name().map_err(|e| e.to_string())?.into_owned();
-        if name.ends_with('/') || is_v1_signature(&name) || !seen.insert(name.clone()) {
+        let stale = is_v1_signature(&name) && (v1_signed || !name.eq_ignore_ascii_case(MANIFEST));
+        if name.ends_with('/') || stale || !seen.insert(name.clone()) {
             continue;
         }
         match edits.get(&name) {
@@ -256,6 +264,24 @@ mod tests {
         );
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(out);
+    }
+
+    #[test]
+    fn plain_jar_keeps_its_manifest() {
+        use std::io::Write;
+        let p = std::env::temp_dir().join(format!("apkscope-rebuild-{}.jar", std::process::id()));
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+        w.write_all(b"Manifest-Version: 1.0\n").unwrap();
+        w.start_file("classes.dex", opts).unwrap();
+        w.write_all(&[0u8; 100]).unwrap();
+        w.finish().unwrap();
+        let (bytes, _) = rebuild(p.to_str().unwrap(), &Edits::new()).unwrap();
+        let z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let names: Vec<_> = z.file_names().flatten().collect();
+        assert_eq!(names, ["META-INF/MANIFEST.MF", "classes.dex"]);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]
