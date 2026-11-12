@@ -393,6 +393,55 @@ mod tests {
         assert!(write::patch(&dex, &[(ci, &grew)]).unwrap().is_none());
     }
 
+    #[test]
+    fn keeps_hiddenapi_flags() {
+        let hidden = r#"
+.class public Lcom/example/Hidden;
+.super Ljava/lang/Object;
+
+.field public static whitelist test-api OPEN:I
+.field private blacklist whitelist:I
+
+.method public constructor greylist-max-o core-platform-api <init>()V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+
+.method public greylist-max-s later()V
+    .locals 0
+    return-void
+.end method
+
+.method public hiddenapi-0x48 unknown()V
+    .locals 0
+    return-void
+.end method
+"#;
+        let plain =
+            ".class public Lcom/example/Plain;\n.super Ljava/lang/Object;\n\n.field public a:I\n";
+        let classes = [text::parse(plain).unwrap(), text::parse(hidden).unwrap()];
+        assert_eq!(classes[1].fields[0].hidden, Some(0x20));
+        assert_eq!(classes[1].fields[1].hidden, Some(2));
+        assert_eq!(classes[1].fields[1].name, model::s(b"whitelist"));
+        let d = write::write(&classes, *b"039").unwrap();
+        let back = read::read(&d).unwrap();
+        assert_eq!(back, classes);
+        let flags = |c: &model::Class| c.methods.iter().map(|m| m.hidden).collect::<Vec<_>>();
+        assert_eq!(flags(&back[1]), [Some(0x13), Some(7), Some(0x48)]);
+        // a class without flags has none after the round trip, not the public list
+        assert_eq!(back[0].fields[0].hidden, None);
+        let printed = text::print(&back[1]);
+        assert!(printed.contains(".method public hiddenapi-0x48 unknown()V"));
+        assert_eq!(text::parse(&printed).unwrap(), back[1]);
+        // a DEX without flags gets no hiddenapi section
+        let d = write::write(&classes[..1], *b"039").unwrap();
+        assert_eq!(read::Reader::new(&d).unwrap().class(0).unwrap(), classes[0]);
+        let map = u32::from_le_bytes(d[0x34..0x38].try_into().unwrap()) as usize;
+        let n = u32::from_le_bytes(d[map..map + 4].try_into().unwrap()) as usize;
+        assert!((0..n).all(|k| d[map + 4 + k * 12..][..2] != [0x00, 0xf0]));
+    }
+
     /// APKSCOPE_ROUNDTRIP=<dir of .apk> cargo test --release roundtrip_apks -- --ignored --nocapture
     #[test]
     #[ignore]

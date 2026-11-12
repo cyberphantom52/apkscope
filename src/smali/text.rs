@@ -50,6 +50,21 @@ const METHOD_FLAGS: &[(u32, &str)] = &[
     (0x10000, "constructor"),
     (0x20000, "declared-synchronized"),
 ];
+/// hiddenapi flags as ART defines them: the low four bits are the API list, the bits above mark
+/// API domains. The list names are baksmali's; `greylist-max-s` continues them.
+const HIDDEN_LISTS: [&str; 8] = [
+    "whitelist",
+    "greylist",
+    "blacklist",
+    "greylist-max-o",
+    "greylist-max-p",
+    "greylist-max-q",
+    "greylist-max-r",
+    "greylist-max-s",
+];
+const HIDDEN_DOMAINS: &[(u32, &str)] = &[(0x10, "core-platform-api"), (0x20, "test-api")];
+/// flags with a list or a domain bit that has no name, kept as a number
+const HIDDEN_RAW: &str = "hiddenapi-";
 const HANDLE_KINDS: [&str; 9] = [
     "static-put",
     "static-get",
@@ -62,6 +77,20 @@ const HANDLE_KINDS: [&str; 9] = [
     "invoke-interface",
 ];
 const VIS: [&str; 3] = ["build", "runtime", "system"];
+
+fn hidden(out: &mut String, h: Option<u32>) {
+    let Some(h) = h else { return };
+    match HIDDEN_LISTS.get((h & 0xf) as usize) {
+        Some(list) if h >> 6 == 0 => {
+            out.push_str(list);
+            out.push(' ');
+            flags(out, h & !0xf, HIDDEN_DOMAINS);
+        }
+        _ => {
+            let _ = write!(out, "{HIDDEN_RAW}{h:#x} ");
+        }
+    }
+}
 
 fn flags(out: &mut String, a: u32, table: &[(u32, &str)]) {
     let mut left = a;
@@ -276,6 +305,7 @@ pub fn print(c: &Class) -> String {
     for f in &c.fields {
         o += "\n.field ";
         flags(&mut o, f.access, FIELD_FLAGS);
+        hidden(&mut o, f.hidden);
         o += &format!("{}:{}", name(&f.name), name(&f.ty));
         if let Some(v) = &f.init {
             o += " = ";
@@ -301,6 +331,7 @@ fn label_name(kind: &str, id: u32) -> String {
 fn method(o: &mut String, m: &Method) {
     o.push_str(".method ");
     flags(o, m.access, METHOD_FLAGS);
+    hidden(o, m.hidden);
     *o += &format!("{}{}\n", name(&m.name), proto(&m.proto));
     let ins = m.ins();
     let base = m.code.as_ref().map_or(0, |c| c.registers - ins);
@@ -973,6 +1004,29 @@ impl<'a> P<'a> {
         Ok(Anno { vis, ty, elems })
     }
 
+    /// hiddenapi words after the access flags: a list, then its domains
+    fn hidden(&mut self) -> Option<u32> {
+        let mut h = None;
+        loop {
+            let save = self.i;
+            let w = self.word();
+            if let Some(list) = HIDDEN_LISTS.iter().position(|&x| x == w) {
+                h = Some(h.unwrap_or(0) | list as u32);
+            } else if let Some(&(bit, _)) = HIDDEN_DOMAINS.iter().find(|x| x.1 == w) {
+                h = Some(h.unwrap_or(0) | bit);
+            } else if let Some(v) = w
+                .strip_prefix(HIDDEN_RAW)
+                .and_then(|v| v.strip_prefix("0x"))
+                .and_then(|v| u32::from_str_radix(v, 16).ok())
+            {
+                h = Some(v);
+            } else {
+                self.i = save;
+                return h;
+            }
+        }
+    }
+
     /// flags words, then the rest of the line's first token (member spec)
     fn flags(&mut self, table: &[(u32, &str)]) -> R<u32> {
         let mut a = 0;
@@ -1133,6 +1187,7 @@ fn spec_name(p: &mut P, stop: &[u8]) -> R<S> {
 
 fn field(p: &mut P) -> R<Field> {
     let access = p.flags(FIELD_FLAGS)?;
+    let hidden = p.hidden();
     let name = spec_name(p, b":")?;
     p.expect(":")?;
     let ty = p.ty()?;
@@ -1142,6 +1197,7 @@ fn field(p: &mut P) -> R<Field> {
         name,
         ty,
         access,
+        hidden,
         init,
         annos: vec![],
     };
@@ -1165,6 +1221,7 @@ fn field(p: &mut P) -> R<Field> {
 
 fn method_p(p: &mut P) -> R<Method> {
     let access = p.flags(METHOD_FLAGS)?;
+    let hidden = p.hidden();
     let name = spec_name(p, b"(")?;
     let proto = p.proto()?;
     p.eol()?;
@@ -1172,6 +1229,7 @@ fn method_p(p: &mut P) -> R<Method> {
         name,
         proto,
         access,
+        hidden,
         code: None,
         annos: vec![],
         param_annos: None,
