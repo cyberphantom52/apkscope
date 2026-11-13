@@ -15,5 +15,6 @@ pub mod rebuild;
 pub mod res;
 pub mod sign;
 pub mod smali;
+pub mod table;
 
 pub use error::{Error, Result};
