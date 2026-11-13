@@ -3,7 +3,7 @@
 //! uncompressed data is aligned the way `zipalign` does (4 bytes, 4096 for native libraries).
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Seek};
 
 /// name -> new content, or None to delete
 pub type Edits = BTreeMap<String, Option<Vec<u8>>>;
@@ -110,8 +110,16 @@ fn write_entry(
 /// offset (where a signing block goes).
 pub fn rebuild(src: &str, edits: &Edits) -> Result<(Vec<u8>, usize), String> {
     let f = std::fs::File::open(src).map_err(|e| format!("{src}: {e}"))?;
-    let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{src}: {e}"))?;
-    let mut out = Vec::with_capacity(std::fs::metadata(src).map_or(0, |m| m.len() as usize));
+    rebuild_from(f, edits).map_err(|e| format!("{src}: {e}"))
+}
+
+/// [`rebuild`] from anything that reads and seeks, such as a `Cursor` over the APK's bytes.
+pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8>, usize), String> {
+    let size = src
+        .seek(std::io::SeekFrom::End(0))
+        .map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(src).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(size as usize);
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
     // a manifest without signature files beside it is a plain JAR's, not a v1 signature

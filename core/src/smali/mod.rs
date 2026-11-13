@@ -13,10 +13,12 @@ pub fn version(dex: &[u8]) -> [u8; 3] {
         .unwrap_or(*b"035")
 }
 
+use crate::apk::Apk;
 use model::Class;
+use std::io::{Read, Seek};
 
 /// `classesN.dex` entries, in load order (classes.dex, classes2.dex, ...).
-fn dex_entries(apk: &crate::apk::Apk) -> Vec<String> {
+fn dex_entries<R: Read + Seek>(apk: &Apk<R>) -> Vec<String> {
     let mut v: Vec<String> = apk
         .zip
         .file_names()
@@ -29,9 +31,13 @@ fn dex_entries(apk: &crate::apk::Apk) -> Vec<String> {
 
 /// Round-trippable Smali of one class (dotted or `L..;` name), for editing then re-assembling.
 pub fn export_class(path: &str, class: &str) -> Result<String, String> {
+    export_class_from(&mut crate::apk::open(path)?, class)
+}
+
+/// [`export_class`] from an APK already open.
+pub fn export_class_from<R: Read + Seek>(apk: &mut Apk<R>, class: &str) -> Result<String, String> {
     let desc = crate::dex::descriptor(class);
-    let mut apk = crate::apk::open(path)?;
-    for name in dex_entries(&apk) {
+    for name in dex_entries(apk) {
         let Some(bytes) = apk.read(&name) else {
             continue;
         };
@@ -53,12 +59,20 @@ pub fn inject(
     sources: &[String],
     edits: &mut crate::rebuild::Edits,
 ) -> Result<Vec<String>, String> {
+    inject_into(&mut crate::apk::open(path)?, sources, edits)
+}
+
+/// [`inject`] into an APK already open.
+pub fn inject_into<R: Read + Seek>(
+    apk: &mut Apk<R>,
+    sources: &[String],
+    edits: &mut crate::rebuild::Edits,
+) -> Result<Vec<String>, String> {
     let classes: Vec<Class> = sources
         .iter()
         .map(|s| text::parse(s))
         .collect::<Result<_, _>>()?;
-    let mut apk = crate::apk::open(path)?;
-    let entries = dex_entries(&apk);
+    let entries = dex_entries(apk);
     // group each edited class under the dex entry it belongs to
     let mut by_dex: std::collections::BTreeMap<String, Vec<Class>> = Default::default();
     'next: for c in classes {
@@ -380,6 +394,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains(":nowhere"), "{e}");
+    }
+
+    #[test]
+    fn edits_an_apk_in_memory() {
+        use std::io::{Cursor, Write};
+        let src = ".class public Lcom/ex/M;\n.super Ljava/lang/Object;\n\
+                   .method public static f()I\n    .registers 1\n    const/16 v0, 0x64\n    return v0\n.end method\n";
+        let dex = write::write(&[text::parse(src).unwrap()], *b"035").unwrap();
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        w.start_file("classes.dex", stored).unwrap();
+        w.write_all(&dex).unwrap();
+        let apk = w.finish().unwrap().into_inner();
+
+        let mut open = Apk::new(Cursor::new(&apk)).unwrap();
+        let class = export_class_from(&mut open, "com.ex.M").unwrap();
+        let edited = class.replace("0x64", "0x65");
+        let mut edits = crate::rebuild::Edits::new();
+        let changed = inject_into(&mut open, &[edited], &mut edits).unwrap();
+        assert_eq!(changed, ["classes.dex"]);
+        let (out, _) = crate::rebuild::rebuild_from(Cursor::new(&apk), &edits).unwrap();
+
+        let mut rebuilt = Apk::new(Cursor::new(out)).unwrap();
+        assert_eq!(rebuilt.dex.len(), 1);
+        assert!(
+            export_class_from(&mut rebuilt, "Lcom/ex/M;")
+                .unwrap()
+                .contains("0x65")
+        );
     }
 
     #[test]

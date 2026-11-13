@@ -392,6 +392,21 @@ let key = apksign::load("key.pk8".as_ref(), "cert.crt".as_ref())?;
 std::fs::write("out.apk", apksign::sign(apk, central_dir, &key)?)?;
 ```
 
+The same works on an APK that is already in memory, or anything else that reads and seeks:
+`apk::Apk::new(reader)` opens it once, `smali::export_class_from` and `smali::inject_into` work on
+the open APK, and `rebuild::rebuild_from` takes the reader.
+
+```rust
+use apkscope_core::{apk::Apk, rebuild, smali};
+use std::io::Cursor;
+
+let mut apk = Apk::new(Cursor::new(&bytes))?;
+let class = smali::export_class_from(&mut apk, "com.example.Api")?;
+let mut edits = rebuild::Edits::new();
+smali::inject_into(&mut apk, &[class.replace("const/4 v0, 0x0", "const/4 v0, 0x1")], &mut edits)?;
+let (unsigned, _) = rebuild::rebuild_from(Cursor::new(&bytes), &edits)?;
+```
+
 Nothing is signed unless you call `sign`. Errors are text, the way the command prints them.
 
 ## Honest limits
