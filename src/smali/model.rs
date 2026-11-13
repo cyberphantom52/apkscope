@@ -149,6 +149,8 @@ pub struct Field {
     pub name: S,
     pub ty: S,
     pub access: u32,
+    /// hiddenapi flags, when the DEX carries them for this class
+    pub hidden: Option<u32>,
     /// static initial value from static_values
     pub init: Option<Value>,
     pub annos: Vec<Anno>,
@@ -159,6 +161,8 @@ pub struct Method {
     pub name: S,
     pub proto: Proto,
     pub access: u32,
+    /// hiddenapi flags, when the DEX carries them for this class
+    pub hidden: Option<u32>,
     pub code: Option<Code>,
     pub annos: Vec<Anno>,
     /// one list per parameter; None when no parameter has any

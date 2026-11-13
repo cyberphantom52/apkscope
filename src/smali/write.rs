@@ -1374,9 +1374,11 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
 
     let (start, mut count) = (out.pos(), 0);
     let mut data_off = Vec::with_capacity(nc);
+    let mut hidden: Vec<Vec<Option<u32>>> = Vec::with_capacity(nc);
     for (c, codes) in classes.iter().zip(&code_off) {
         if c.fields.is_empty() && c.methods.is_empty() {
             data_off.push(0);
+            hidden.push(vec![]);
             continue;
         }
         let fid = |f: &Field| {
@@ -1393,22 +1395,22 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
                 proto: m.proto.clone(),
             }]
         };
-        let mut sf: Vec<(u32, u32)> = c
+        let mut sf: Vec<(u32, u32, Option<u32>)> = c
             .fields
             .iter()
             .filter(|f| f.access & ACC_STATIC != 0)
-            .map(|f| (fid(f), f.access))
+            .map(|f| (fid(f), f.access, f.hidden))
             .collect();
-        let mut inf: Vec<(u32, u32)> = c
+        let mut inf: Vec<(u32, u32, Option<u32>)> = c
             .fields
             .iter()
             .filter(|f| f.access & ACC_STATIC == 0)
-            .map(|f| (fid(f), f.access))
+            .map(|f| (fid(f), f.access, f.hidden))
             .collect();
-        let mut dm: Vec<(u32, u32, u32)> = vec![];
-        let mut vm: Vec<(u32, u32, u32)> = vec![];
+        let mut dm: Vec<(u32, u32, u32, Option<u32>)> = vec![];
+        let mut vm: Vec<(u32, u32, u32, Option<u32>)> = vec![];
         for (m, &co) in c.methods.iter().zip(codes) {
-            (if m.is_direct() { &mut dm } else { &mut vm }).push((mid(m), m.access, co));
+            (if m.is_direct() { &mut dm } else { &mut vm }).push((mid(m), m.access, co, m.hidden));
         }
         sf.sort_unstable();
         inf.sort_unstable();
@@ -1416,13 +1418,16 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
         vm.sort_unstable();
         data_off.push(out.pos());
         count += 1;
+        // hiddenapi flags follow the members' order in class_data
+        let flags = (sf.iter().chain(&inf).map(|x| x.2)).chain(dm.iter().chain(&vm).map(|x| x.3));
+        hidden.push(flags.collect());
         let o = &mut out.buf;
         for n in [sf.len(), inf.len(), dm.len(), vm.len()] {
             uleb(o, n as u32);
         }
         for list in [&sf, &inf] {
             let mut prev = 0;
-            for &(i, a) in list.iter() {
+            for &(i, a, _) in list.iter() {
                 uleb(o, i - prev);
                 uleb(o, a);
                 prev = i;
@@ -1430,7 +1435,7 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
         }
         for list in [&dm, &vm] {
             let mut prev = 0;
-            for &(i, a, co) in list.iter() {
+            for &(i, a, co, _) in list.iter() {
                 if i == prev && prev != 0 {
                     return Err(format!(
                         "{}: method defined twice",
@@ -1445,6 +1450,29 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
         }
     }
     out.section(0x2000, count, start);
+
+    // hiddenapi class data: the section's size, an offset per class_def (0 for a class without
+    // flags), then the flags
+    if hidden.iter().flatten().any(|h| h.is_some()) {
+        out.align();
+        let start = out.pos();
+        let mut flags = vec![];
+        let mut offsets = Vec::with_capacity(nc);
+        for members in &hidden {
+            if members.iter().all(|h| h.is_none()) {
+                offsets.push(0);
+                continue;
+            }
+            offsets.push((4 + nc * 4 + flags.len()) as u32);
+            for h in members {
+                uleb(&mut flags, h.unwrap_or(0));
+            }
+        }
+        out.u32((4 + nc * 4 + flags.len()) as u32);
+        offsets.into_iter().for_each(|o| out.u32(o));
+        out.buf.extend_from_slice(&flags);
+        out.section(0xf000, 1, start);
+    }
 
     // map list
     out.align();
@@ -1616,6 +1644,7 @@ fn shell_eq(a: &Class, b: &Class) -> bool {
             x.name == y.name
                 && x.proto == y.proto
                 && x.access == y.access
+                && x.hidden == y.hidden
                 && x.annos == y.annos
                 && x.param_annos == y.param_annos
         })
