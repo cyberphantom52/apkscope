@@ -371,6 +371,29 @@ from the libraries. **Click** a name to mark it, **Ctrl+click** to jump to it, *
 callers, call graph, field access, Frida hook, Smali, rename. Results jump to the exact line.
 **Edit smali** on a class to patch its code, then **Build & sign** with undo.
 
+## As a library
+
+The editing half is its own crate, `apkscope-core` (in `core/`), for tools that patch APKs
+themselves: the DEX reader and writer, the Smali round trip, resources, rebuild and signing, without
+the decompiler, the command line or the viewer.
+
+```toml
+apkscope-core = { git = "https://github.com/suffixing/apkscope" }
+```
+
+```rust
+use apkscope_core::{apksign, rebuild, smali};
+
+let class = smali::export_class("app.apk", "com.example.Api")?;
+let mut edits = rebuild::Edits::new();
+smali::inject("app.apk", &[class.replace("const/4 v0, 0x0", "const/4 v0, 0x1")], &mut edits)?;
+let (apk, central_dir) = rebuild::rebuild("app.apk", &edits)?;
+let key = apksign::load("key.pk8".as_ref(), "cert.crt".as_ref())?;
+std::fs::write("out.apk", apksign::sign(apk, central_dir, &key)?)?;
+```
+
+Nothing is signed unless you call `sign`. Errors are text, the way the command prints them.
+
 ## Honest limits
 
 - Some complex methods still use `goto` labels (marked `WARNING`).
