@@ -2,6 +2,7 @@
 //! replaced or added files are written fresh, old v1 signature files are dropped, and
 //! uncompressed data is aligned the way `zipalign` does (4 bytes, 4096 for native libraries).
 
+use crate::{Error, Result};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 
@@ -62,8 +63,8 @@ fn write_entry(
     crc: u32,
     usize: u32,
     data: &[u8],
-) -> Result<Entry, String> {
-    let offset = u32::try_from(out.len()).map_err(|_| "APK larger than 4 GB")?;
+) -> Result<Entry> {
+    let offset = u32::try_from(out.len()).map_err(|_| Error::TooLarge("the APK".into()))?;
     let align = alignment(name, method);
     let base = out.len() + 30 + name.len();
     // pad with Android's alignment extra field (id 0xd935): id, size, alignment, zeros
@@ -108,17 +109,17 @@ fn write_entry(
 
 /// Rebuild `src` with `edits` applied. Returns the unsigned APK and its central directory
 /// offset (where a signing block goes).
-pub fn rebuild(src: &str, edits: &Edits) -> Result<(Vec<u8>, usize), String> {
-    let f = std::fs::File::open(src).map_err(|e| format!("{src}: {e}"))?;
-    rebuild_from(f, edits).map_err(|e| format!("{src}: {e}"))
+pub fn rebuild(src: &str, edits: &Edits) -> Result<(Vec<u8>, usize)> {
+    let f = std::fs::File::open(src).map_err(Error::io(src))?;
+    rebuild_from(f, edits).map_err(|e| e.at(src))
 }
 
 /// [`rebuild`] from anything that reads and seeks, such as a `Cursor` over the APK's bytes.
-pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8>, usize), String> {
+pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8>, usize)> {
     let size = src
         .seek(std::io::SeekFrom::End(0))
-        .map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(src).map_err(|e| e.to_string())?;
+        .map_err(zip::result::ZipError::Io)?;
+    let mut zip = zip::ZipArchive::new(src)?;
     let mut out = Vec::with_capacity(size as usize);
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -128,8 +129,8 @@ pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8
         .flatten()
         .any(|n| is_v1_signature(&n) && !n.eq_ignore_ascii_case(MANIFEST));
     for i in 0..zip.len() {
-        let mut e = zip.by_index_raw(i).map_err(|e| e.to_string())?;
-        let name = e.name().map_err(|e| e.to_string())?.into_owned();
+        let mut e = zip.by_index_raw(i)?;
+        let name = e.name()?.into_owned();
         let stale = is_v1_signature(&name) && (v1_signed || !name.eq_ignore_ascii_case(MANIFEST));
         if name.ends_with('/') || stale || !seen.insert(name.clone()) {
             continue;
@@ -147,12 +148,17 @@ pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8
                 let method = match e.compression() {
                     zip::CompressionMethod::Stored => 0,
                     zip::CompressionMethod::Deflated => 8,
-                    other => return Err(format!("{name}: unsupported compression {other:?}")),
+                    other => {
+                        return Err(Error::UnsupportedCompression {
+                            entry: name,
+                            method: format!("{other:?}"),
+                        });
+                    }
                 };
                 let (crc, usize) = (e.crc32(), e.size() as u32);
                 let mut raw = Vec::with_capacity(e.compressed_size() as usize);
                 e.read_to_end(&mut raw)
-                    .map_err(|err| format!("{name}: {err}"))?;
+                    .map_err(|err| Error::from(zip::result::ZipError::Io(err)).at(&name))?;
                 entries.push(write_entry(&mut out, &name, method, crc, usize, &raw)?);
             }
         }
@@ -166,7 +172,7 @@ pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8
         }
     }
     if entries.len() > 0xffff {
-        return Err("more than 65535 files: Android can't read ZIP64 APKs".into());
+        return Err(Error::TooManyEntries);
     }
     let cd = out.len();
     for e in &entries {
@@ -194,7 +200,7 @@ pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8
     push32(&mut out, cd_size as u32);
     push32(
         &mut out,
-        u32::try_from(cd).map_err(|_| "APK larger than 4 GB")?,
+        u32::try_from(cd).map_err(|_| Error::TooLarge("the APK".into()))?,
     );
     push16(&mut out, 0);
     Ok((out, cd))
@@ -202,9 +208,9 @@ pub fn rebuild_from<R: Read + Seek>(mut src: R, edits: &Edits) -> Result<(Vec<u8
 
 /// A new or replaced file: stored when Android needs it uncompressed or the file it replaces
 /// was (`stored`), else deflated.
-fn fresh(out: &mut Vec<u8>, name: &str, data: &[u8], stored: bool) -> Result<Entry, String> {
+fn fresh(out: &mut Vec<u8>, name: &str, data: &[u8], stored: bool) -> Result<Entry> {
     let crc = crc32fast::hash(data);
-    let usize = u32::try_from(data.len()).map_err(|_| format!("{name}: larger than 4 GB"))?;
+    let usize = u32::try_from(data.len()).map_err(|_| Error::TooLarge(name.into()))?;
     if stored || must_store(name) {
         return write_entry(out, name, 0, crc, usize, data);
     }

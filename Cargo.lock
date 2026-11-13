@@ -198,6 +198,7 @@ dependencies = [
  "rsa",
  "sha1",
  "sha2",
+ "thiserror 2.0.21",
  "zip",
 ]
 

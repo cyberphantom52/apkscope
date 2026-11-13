@@ -11,6 +11,7 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
 
 use crate::sign::{V2_ID, V3_ID};
+use crate::{Error, Result};
 
 /// RSASSA-PKCS1-v1_5 with SHA2-256, chunked SHA2-256 content digest
 const RSA_SHA256: u32 = 0x0103;
@@ -98,13 +99,13 @@ pub struct Key {
 }
 
 /// New RSA-2048 key with a self-signed certificate for `name`, valid 30 years.
-pub fn generate(name: &str) -> Result<Key, String> {
+pub fn generate(name: &str) -> Result<Key> {
     let mut rng = rand::thread_rng();
-    let private = RsaPrivateKey::new(&mut rng, 2048).map_err(|e| e.to_string())?;
+    let private = RsaPrivateKey::new(&mut rng, 2048)?;
     let spki = private
         .to_public_key()
         .to_public_key_der()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| Error::signature(format!("public key: {e}")))?
         .as_bytes()
         .to_vec();
     let mut serial: [u8; 16] = rand::random();
@@ -173,24 +174,21 @@ fn pem_or_der(d: &[u8]) -> Vec<u8> {
 }
 
 /// Load a PKCS#8 private key and its certificate (PEM or DER).
-pub fn load(key_file: &Path, cert_file: &Path) -> Result<Key, String> {
-    let k =
-        pem_or_der(&std::fs::read(key_file).map_err(|e| format!("{}: {e}", key_file.display()))?);
-    let private = RsaPrivateKey::from_pkcs8_der(&k).map_err(|e| {
-        format!(
-            "{}: not an unencrypted PKCS#8 RSA key ({e})",
-            key_file.display()
-        )
+pub fn load(key_file: &Path, cert_file: &Path) -> Result<Key> {
+    let k = pem_or_der(&std::fs::read(key_file).map_err(Error::io(key_file))?);
+    let private = RsaPrivateKey::from_pkcs8_der(&k).map_err(|source| Error::Key {
+        path: key_file.into(),
+        source,
     })?;
-    let cert =
-        pem_or_der(&std::fs::read(cert_file).map_err(|e| format!("{}: {e}", cert_file.display()))?);
-    crate::sign::parse_cert(&cert)
-        .ok_or_else(|| format!("{}: not an X.509 certificate", cert_file.display()))?;
+    let cert = pem_or_der(&std::fs::read(cert_file).map_err(Error::io(cert_file))?);
+    crate::sign::parse_cert(&cert).ok_or_else(|| Error::Certificate {
+        path: cert_file.into(),
+    })?;
     Ok(Key { private, cert })
 }
 
 /// apkscope's own key: `%APPDATA%\apkscope\keys\apkscope.pk8` + `apkscope.crt`, created on first use.
-pub fn default_key() -> Result<(Key, PathBuf), String> {
+pub fn default_key() -> Result<(Key, PathBuf)> {
     let base = std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .map(PathBuf::from)
@@ -203,10 +201,13 @@ pub fn default_key() -> Result<(Key, PathBuf), String> {
         return load(&k, &c).map(|key| (key, dir));
     }
     let key = generate("apkscope")?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let pk8 = key.private.to_pkcs8_der().map_err(|e| e.to_string())?;
-    std::fs::write(&k, pk8.as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::write(&c, &key.cert).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(Error::io(&dir))?;
+    let pk8 = key.private.to_pkcs8_der().map_err(|source| Error::Key {
+        path: k.clone(),
+        source,
+    })?;
+    std::fs::write(&k, pk8.as_bytes()).map_err(Error::io(&k))?;
+    std::fs::write(&c, &key.cert).map_err(Error::io(&c))?;
     Ok((key, dir))
 }
 
@@ -239,23 +240,23 @@ fn content_digest(sections: &[&[u8]]) -> Vec<u8> {
 }
 
 /// End-of-central-directory start (no comment support beyond what the scan finds).
-fn eocd_at(apk: &[u8]) -> Result<usize, String> {
+fn eocd_at(apk: &[u8]) -> Result<usize> {
     (0..apk.len().saturating_sub(21))
         .rev()
         .take(65_557)
         .find(|&i| apk[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
-        .ok_or_else(|| "no end of central directory".into())
+        .ok_or_else(|| Error::signature("no end of central directory"))
 }
 
 /// Sign an unsigned APK (as built by `rebuild`) with v2 + v3.
-pub fn sign(apk: Vec<u8>, cd: usize, key: &Key) -> Result<Vec<u8>, String> {
+pub fn sign(apk: Vec<u8>, cd: usize, key: &Key) -> Result<Vec<u8>> {
     let eocd = eocd_at(&apk)?;
     let digest = content_digest(&[&apk[..cd], &apk[cd..eocd], &apk[eocd..]]);
     let pubkey = key
         .private
         .to_public_key()
         .to_public_key_der()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| Error::signature(format!("public key: {e}")))?
         .as_bytes()
         .to_vec();
     let signer = SigningKey::<Sha256>::new(key.private.clone());
@@ -343,51 +344,53 @@ fn take_u32(d: &mut &[u8]) -> Option<u32> {
 
 /// Check one v2/v3 scheme value against the file's content digest. `Ok(Some(alg))`: signed
 /// with an algorithm this can't check (DSA, ECDSA, RSA-PSS, SHA-512).
-fn verify_scheme(value: &[u8], v3: bool, digest: &[u8]) -> Result<Option<u32>, String> {
+fn verify_scheme(value: &[u8], v3: bool, digest: &[u8]) -> Result<Option<u32>> {
     let mut d = value;
-    let signers = take_lp(&mut d).ok_or("bad block")?;
+    let signers = take_lp(&mut d).ok_or_else(|| Error::signature("bad block"))?;
     let mut s = &signers[..];
-    let signer = take_lp(&mut s).ok_or("no signer")?;
+    let signer = take_lp(&mut s).ok_or_else(|| Error::signature("no signer"))?;
     let mut r = &signer[..];
-    let signed = take_lp(&mut r).ok_or("no signed data")?;
+    let signed = take_lp(&mut r).ok_or_else(|| Error::signature("no signed data"))?;
     if v3 {
         take_u32(&mut r);
         take_u32(&mut r);
     }
-    let sigs = take_lp(&mut r).ok_or("no signatures")?;
-    let pubkey = take_lp(&mut r).ok_or("no public key")?;
+    let sigs = take_lp(&mut r).ok_or_else(|| Error::signature("no signatures"))?;
+    let pubkey = take_lp(&mut r).ok_or_else(|| Error::signature("no public key"))?;
     let mut sg = &sigs[..];
-    let sig = take_lp(&mut sg).ok_or("no signature")?;
+    let sig = take_lp(&mut sg).ok_or_else(|| Error::signature("no signature"))?;
     let mut x = &sig[..];
-    let alg = take_u32(&mut x).ok_or("bad signature")?;
+    let alg = take_u32(&mut x).ok_or_else(|| Error::signature("bad signature"))?;
     if alg != RSA_SHA256 {
         return Ok(Some(alg));
     }
-    let sig_bytes = take_lp(&mut x).ok_or("bad signature")?;
-    let key = RsaPublicKey::from_public_key_der(&pubkey).map_err(|e| format!("public key: {e}"))?;
-    let sig = Signature::try_from(&sig_bytes[..]).map_err(|e| e.to_string())?;
+    let sig_bytes = take_lp(&mut x).ok_or_else(|| Error::signature("bad signature"))?;
+    let key = RsaPublicKey::from_public_key_der(&pubkey)
+        .map_err(|e| Error::signature(format!("public key: {e}")))?;
+    let sig = Signature::try_from(&sig_bytes[..])
+        .map_err(|e| Error::signature(format!("bad signature: {e}")))?;
     VerifyingKey::<Sha256>::new(key)
         .verify(&signed, &sig)
-        .map_err(|_| "signature does not match the signed data")?;
+        .map_err(|_| Error::signature("signature does not match the signed data"))?;
     // the signed digest must equal the file's
     let mut sd = &signed[..];
-    let digests = take_lp(&mut sd).ok_or("no digests")?;
+    let digests = take_lp(&mut sd).ok_or_else(|| Error::signature("no digests"))?;
     let mut dd = &digests[..];
-    let first = take_lp(&mut dd).ok_or("no digest")?;
+    let first = take_lp(&mut dd).ok_or_else(|| Error::signature("no digest"))?;
     let mut fx = &first[..];
     take_u32(&mut fx);
-    let want = take_lp(&mut fx).ok_or("no digest")?;
+    let want = take_lp(&mut fx).ok_or_else(|| Error::signature("no digest"))?;
     if want != digest {
-        return Err(
-            "the APK's content doesn't match its signed digest (modified after signing)".into(),
-        );
+        return Err(Error::signature(
+            "the APK's content doesn't match its signed digest (modified after signing)",
+        ));
     }
     Ok(None)
 }
 
 /// Verify v2 and v3 signatures of an APK file: one line per scheme.
-pub fn verify(path: &str) -> Result<Vec<String>, String> {
-    let apk = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+pub fn verify(path: &str) -> Result<Vec<String>> {
+    let apk = std::fs::read(path).map_err(Error::io(path))?;
     let eocd = eocd_at(&apk)?;
     let cd = u32::from_le_bytes(apk[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
     let Some(block) = crate::sign::signing_block(path) else {

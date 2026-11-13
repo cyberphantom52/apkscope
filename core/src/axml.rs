@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::res::{Names, framework_id};
+use crate::{Error, Result};
 
 const ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
 
@@ -32,7 +33,7 @@ fn unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-pub fn parse(text: &str) -> Result<Vec<Node>, String> {
+pub fn parse(text: &str) -> Result<Vec<Node>> {
     let mut out = Vec::new();
     let b = text.as_bytes();
     let mut i = 0;
@@ -40,22 +41,33 @@ pub fn parse(text: &str) -> Result<Vec<Node>, String> {
     let mut stack: Vec<String> = Vec::new();
     while i < b.len() {
         if text[i..].starts_with("<?") {
-            i += text[i..].find("?>").ok_or("unterminated <?")? + 2;
+            i += text[i..]
+                .find("?>")
+                .ok_or_else(|| Error::xml("unterminated <?"))?
+                + 2;
         } else if text[i..].starts_with("<!--") {
-            i += text[i..].find("-->").ok_or("unterminated comment")? + 3;
+            i += text[i..]
+                .find("-->")
+                .ok_or_else(|| Error::xml("unterminated comment"))?
+                + 3;
         } else if text[i..].starts_with("</") {
-            let end = i + text[i..].find('>').ok_or("unterminated end tag")?;
+            let end = i + text[i..]
+                .find('>')
+                .ok_or_else(|| Error::xml("unterminated end tag"))?;
             let name = text[i + 2..end].trim().to_string();
             match stack.pop() {
                 Some(open) if open == name => {}
                 Some(open) => {
-                    return Err(format!("line {}: </{name}> closes <{open}>", line_at(i)));
+                    return Err(Error::xml(format!(
+                        "line {}: </{name}> closes <{open}>",
+                        line_at(i)
+                    )));
                 }
                 None => {
-                    return Err(format!(
+                    return Err(Error::xml(format!(
                         "line {}: </{name}> without an open tag",
                         line_at(i)
-                    ));
+                    )));
                 }
             }
             out.push(Node::End {
@@ -71,7 +83,7 @@ pub fn parse(text: &str) -> Result<Vec<Node>, String> {
             }
             let name = text[i + 1..j].to_string();
             if name.is_empty() {
-                return Err(format!("line {line}: empty tag name"));
+                return Err(Error::xml(format!("line {line}: empty tag name")));
             }
             let mut attrs = Vec::new();
             loop {
@@ -79,7 +91,7 @@ pub fn parse(text: &str) -> Result<Vec<Node>, String> {
                     j += 1;
                 }
                 match b.get(j) {
-                    None => return Err(format!("line {line}: unterminated <{name}>")),
+                    None => return Err(Error::xml(format!("line {line}: unterminated <{name}>"))),
                     Some(b'>') => {
                         out.push(Node::Start {
                             name: name.clone(),
@@ -102,19 +114,25 @@ pub fn parse(text: &str) -> Result<Vec<Node>, String> {
                     }
                     _ => {
                         let k = j + text[j..].find('=').ok_or_else(|| {
-                            format!("line {}: attribute without a value", line_at(j))
+                            Error::xml(format!("line {}: attribute without a value", line_at(j)))
                         })?;
                         let an = text[j..k].trim().to_string();
                         let q = k
                             + 1
                             + text[k + 1..].find(['"', '\'']).ok_or_else(|| {
-                                format!("line {}: attribute {an} needs quotes", line_at(k))
+                                Error::xml(format!(
+                                    "line {}: attribute {an} needs quotes",
+                                    line_at(k)
+                                ))
                             })?;
                         let quote = b[q] as char;
                         let e = q
                             + 1
                             + text[q + 1..].find(quote).ok_or_else(|| {
-                                format!("line {}: unterminated value of {an}", line_at(q))
+                                Error::xml(format!(
+                                    "line {}: unterminated value of {an}",
+                                    line_at(q)
+                                ))
                             })?;
                         attrs.push((an, unescape(&text[q + 1..e])));
                         j = e + 1;
@@ -132,7 +150,7 @@ pub fn parse(text: &str) -> Result<Vec<Node>, String> {
         }
     }
     if let Some(open) = stack.pop() {
-        return Err(format!("<{open}> is never closed"));
+        return Err(Error::xml(format!("<{open}> is never closed")));
     }
     Ok(out)
 }
@@ -232,7 +250,7 @@ fn complex(v: f64, unit: u32) -> u32 {
 }
 
 /// Resolve `@type/name`, `@android:type/name`, `@0x7f..`, `?attr/x` to (type, id).
-fn reference(s: &str, names: &Names) -> Result<(u8, u32), String> {
+fn reference(s: &str, names: &Names) -> Result<(u8, u32)> {
     let (ty, body) = if let Some(b) = s.strip_prefix('?') {
         (0x02, b)
     } else {
@@ -248,22 +266,22 @@ fn reference(s: &str, names: &Names) -> Result<(u8, u32), String> {
     if let Some(hex) = body.strip_prefix("0x") {
         return u32::from_str_radix(hex, 16)
             .map(|id| (ty, id))
-            .map_err(|_| format!("bad resource id {s}"));
+            .map_err(|_| Error::xml(format!("bad resource id {s}")));
     }
     let (t, n) = body
         .split_once('/')
-        .ok_or_else(|| format!("{s}: expected @type/name"))?;
+        .ok_or_else(|| Error::xml(format!("{s}: expected @type/name")))?;
     let id = if android {
         framework_id(t, n)
     } else {
         names.id_of(t, n)
     };
     id.map(|id| (ty, id))
-        .ok_or_else(|| format!("unknown resource {s}"))
+        .ok_or_else(|| Error::xml(format!("unknown resource {s}")))
 }
 
 /// (raw string, type, data) for an attribute value.
-fn typed(text: &str, orig: Option<u8>, names: &Names) -> Result<(Option<String>, u8, u32), String> {
+fn typed(text: &str, orig: Option<u8>, names: &Names) -> Result<(Option<String>, u8, u32)> {
     let string = Ok((Some(text.to_string()), 0x03, 0));
     // an attribute that was a string stays one, whatever it looks like now
     if orig == Some(0x03) {
@@ -314,9 +332,9 @@ fn typed(text: &str, orig: Option<u8>, names: &Names) -> Result<(Option<String>,
         }
     }
     if orig.is_some_and(|t| t != 0x03) {
-        return Err(format!(
+        return Err(Error::xml(format!(
             "\"{text}\" can't be stored as the type this attribute had"
-        ));
+        )));
     }
     string
 }
@@ -396,7 +414,7 @@ fn node_head(o: &mut Vec<u8>, ty: u16, size: u32, line: u32) {
 
 /// Encode XML text as Android binary XML. `original` (the file being replaced) supplies the
 /// types and resource ids of attributes that already existed.
-pub fn encode(text: &str, original: Option<&[u8]>, names: &Names) -> Result<Vec<u8>, String> {
+pub fn encode(text: &str, original: Option<&[u8]>, names: &Names) -> Result<Vec<u8>> {
     let nodes = parse(text)?;
     let orig = original.map(original_attrs).unwrap_or_default();
     // namespace prefixes, from xmlns: attributes anywhere in the document
@@ -410,7 +428,7 @@ pub fn encode(text: &str, original: Option<&[u8]>, names: &Names) -> Result<Vec<
             }
         }
     }
-    let attr_id = |full: &str| -> Result<Option<u32>, String> {
+    let attr_id = |full: &str| -> Result<Option<u32>> {
         let Some((prefix, name)) = full.split_once(':') else {
             return Ok(None);
         };
@@ -420,9 +438,9 @@ pub fn encode(text: &str, original: Option<&[u8]>, names: &Names) -> Result<Vec<
         match ns.get(prefix).map(String::as_str) {
             Some(ANDROID_NS) => framework_id("attr", name)
                 .map(Some)
-                .ok_or_else(|| format!("unknown attribute {full}")),
+                .ok_or_else(|| Error::xml(format!("unknown attribute {full}"))),
             Some(_) => Ok(None),
-            None => Err(format!("undeclared namespace prefix in {full}")),
+            None => Err(Error::xml(format!("undeclared namespace prefix in {full}"))),
         }
     };
     // attribute names with resource ids go first, in id order, matching the resource map
@@ -473,7 +491,7 @@ pub fn encode(text: &str, original: Option<&[u8]>, names: &Names) -> Result<Vec<
                         None => (None, k.clone()),
                     };
                     let (raw, ty, data) = typed(v, orig.get(k).map(|x| x.0), names)
-                        .map_err(|e| format!("line {line}, {k}: {e}"))?;
+                        .map_err(|e| e.at(format!("line {line}, {k}")))?;
                     list.push((id, uri, local, raw, ty, data));
                 }
                 list.sort_by(|a, b| {
@@ -582,8 +600,18 @@ mod tests {
             }
         );
         assert_eq!(n[3], Node::Text("hi".into()));
-        assert!(parse("<a><b></a>").unwrap_err().contains("closes <b>"));
-        assert!(parse("<a x=1/>").unwrap_err().contains("needs quotes"));
+        assert!(
+            parse("<a><b></a>")
+                .unwrap_err()
+                .to_string()
+                .contains("closes <b>")
+        );
+        assert!(
+            parse("<a x=1/>")
+                .unwrap_err()
+                .to_string()
+                .contains("needs quotes")
+        );
     }
 
     #[test]

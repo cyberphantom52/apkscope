@@ -1,25 +1,26 @@
 //! Android resources: `resources.arsc` table and binary XML (AXML) decoding.
 //! Format: frameworks/base/libs/androidfw/include/androidfw/ResourceTypes.h
 
+use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
-type R<T> = Result<T, String>;
+type R<T> = Result<T>;
 
 fn u8_at(d: &[u8], o: usize) -> R<u8> {
     d.get(o)
         .copied()
-        .ok_or_else(|| format!("read past end at {o:#x}"))
+        .ok_or_else(|| Error::resources(format!("read past end at {o:#x}")))
 }
 fn u16_at(d: &[u8], o: usize) -> R<u16> {
     d.get(o..o + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .ok_or_else(|| format!("read past end at {o:#x}"))
+        .ok_or_else(|| Error::resources(format!("read past end at {o:#x}")))
 }
 fn u32_at(d: &[u8], o: usize) -> R<u32> {
     d.get(o..o + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .ok_or_else(|| format!("read past end at {o:#x}"))
+        .ok_or_else(|| Error::resources(format!("read past end at {o:#x}")))
 }
 
 /// ResStringPool -> all strings (style spans are ignored)
@@ -45,7 +46,11 @@ pub(crate) fn string_pool(d: &[u8], at: usize) -> R<Vec<String>> {
             };
             len8(&mut o)?;
             let len = len8(&mut o)?;
-            String::from_utf8_lossy(d.get(o..o + len).ok_or("string past end")?).into_owned()
+            String::from_utf8_lossy(
+                d.get(o..o + len)
+                    .ok_or_else(|| Error::resources("string past end"))?,
+            )
+            .into_owned()
         } else {
             let mut len = u16_at(d, o)? as usize;
             o += 2;
@@ -84,7 +89,7 @@ pub struct Table {
 
 pub fn parse_table(d: &[u8]) -> R<Table> {
     if u16_at(d, 0)? != 0x0002 {
-        return Err("not a resource table".into());
+        return Err(Error::resources("not a resource table"));
     }
     let mut t = Table {
         package: String::new(),
@@ -350,7 +355,7 @@ impl Names {
     /// string pool: for the manifest, which only names a handful of ids.
     pub fn from_arsc(d: &[u8]) -> R<Names> {
         if u16_at(d, 0)? != 0x0002 {
-            return Err("not a resource table".into());
+            return Err(Error::resources("not a resource table"));
         }
         let mut map = HashMap::new();
         let mut at = u16_at(d, 2)? as usize;
@@ -571,7 +576,7 @@ fn res_string(s: &str) -> String {
 /// Decode a binary XML document to text. `names` resolves @references when available.
 pub fn decode_xml(d: &[u8], names: Option<&Names>) -> R<String> {
     if u16_at(d, 0)? != 0x0003 {
-        return Err("not binary XML".into());
+        return Err(Error::resources("not binary XML"));
     }
     let empty = Names {
         map: HashMap::new(),

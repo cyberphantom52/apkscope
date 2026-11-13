@@ -1,6 +1,7 @@
 //! An APK (or a JAR of DEX files) as Android loads it, from a file or from anything that reads
 //! and seeks, such as a `Cursor` over bytes already in memory.
 
+use crate::{Error, Result};
 use std::fs;
 use std::io::{Read, Seek};
 
@@ -10,24 +11,24 @@ pub struct Apk<R = fs::File> {
     pub dex: Vec<(String, Vec<u8>)>,
 }
 
-pub fn open(path: &str) -> Result<Apk, String> {
-    let file = fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    Apk::new(file).map_err(|e| format!("{path}: {e}"))
+pub fn open(path: &str) -> Result<Apk> {
+    let file = fs::File::open(path).map_err(Error::io(path))?;
+    Apk::new(file).map_err(|e| e.at(path))
 }
 
 impl<R: Read + Seek> Apk<R> {
-    pub fn new(reader: R) -> Result<Self, String> {
-        let mut zip = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
+    pub fn new(reader: R) -> Result<Self> {
+        let mut zip = zip::ZipArchive::new(reader)?;
         let mut dex = Vec::new();
         for i in 0..zip.len() {
-            let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-            let name = entry.name().map_err(|e| e.to_string())?.into_owned();
+            let mut entry = zip.by_index(i)?;
+            let name = entry.name()?.into_owned();
             // only root-level classes*.dex are loaded by Android
             if name.starts_with("classes") && name.ends_with(".dex") && !name.contains('/') {
                 let mut buf = Vec::with_capacity(entry.size() as usize);
                 entry
                     .read_to_end(&mut buf)
-                    .map_err(|e| format!("{name}: {e}"))?;
+                    .map_err(|e| Error::from(zip::result::ZipError::Io(e)).at(&name))?;
                 dex.push((name, buf));
             }
         }

@@ -1158,15 +1158,15 @@ fn main() -> ExitCode {
         [cmd, path] if cmd == "worker" => run_big_stack(|| mcp::worker(path, deobf)),
         [cmd, path] if cmd == "disasm" => disasm(path, None),
         [cmd, path, class] if cmd == "disasm" => disasm(path, Some(class)),
-        [cmd, path, class] if cmd == "smali" => {
-            smali::export_class(path, class).and_then(|t| emit(&t))
-        }
+        [cmd, path, class] if cmd == "smali" => smali::export_class(path, class)
+            .map_err(String::from)
+            .and_then(|t| emit(&t)),
         [cmd, path, out] if cmd == "export" => export_cmd(path, out, deobf),
         [cmd, ..] if cmd == "search" => run_big_stack(|| search_cmd(&rest, deobf)),
         [cmd, ..] if cmd == "build" => build_cmd(&rest),
-        [cmd, path] if cmd == "verify" => {
-            apksign::verify(path).map(|lines| lines.iter().for_each(|l| println!("{l}")))
-        }
+        [cmd, path] if cmd == "verify" => apksign::verify(path)
+            .map(|lines| lines.iter().for_each(|l| println!("{l}")))
+            .map_err(String::from),
         [cmd] if cmd == "--version" || cmd == "-V" => {
             println!("apkscope {}", env!("CARGO_PKG_VERSION"));
             Ok(())

@@ -1198,7 +1198,7 @@ pub fn smali_fallback(dex: &Dex, m: &dex::Method, why: &str) -> String {
                         "     *   {:04x}: {}",
                         i.off,
                         crate::render(dex, &i)
-                            .unwrap_or_else(|e| e)
+                            .unwrap_or_else(|e| e.to_string())
                             .replace("*/", "* /")
                     );
                 }

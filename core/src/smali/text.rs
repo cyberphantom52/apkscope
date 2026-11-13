@@ -3,11 +3,12 @@
 
 use super::model::*;
 use crate::bytecode::{self, Fmt};
+use crate::{Error, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
 use std::sync::Arc;
 
-type R<T> = Result<T, String>;
+type R<T> = Result<T>;
 
 // ---------- printing ----------
 
@@ -636,12 +637,19 @@ fn text_bytes(t: &str) -> S {
 
 impl<'a> P<'a> {
     fn err<T>(&self, m: impl std::fmt::Display) -> R<T> {
+        Err(self.error(m))
+    }
+    /// What is wrong at the current position, with its line.
+    fn error(&self, m: impl std::fmt::Display) -> Error {
         let line = self.s[..self.i.min(self.s.len())]
             .iter()
             .filter(|&&b| b == b'\n')
             .count()
             + 1;
-        Err(format!("line {line}: {m}"))
+        Error::Smali {
+            line,
+            message: m.to_string(),
+        }
     }
     fn peek(&self) -> Option<u8> {
         self.s.get(self.i).copied()
@@ -738,7 +746,7 @@ impl<'a> P<'a> {
             _ => return self.err(format!("expected a type, found `{}`", self.rest_of_line())),
         }
         Ok(text_bytes(
-            std::str::from_utf8(&self.s[st..self.i]).map_err(|e| e.to_string())?,
+            std::str::from_utf8(&self.s[st..self.i]).map_err(|e| self.error(e))?,
         ))
     }
     fn proto(&mut self) -> R<Proto> {
@@ -762,7 +770,7 @@ impl<'a> P<'a> {
             }
             self.i += 1;
         }
-        let nm = text_bytes(std::str::from_utf8(&self.s[st..self.i]).map_err(|e| e.to_string())?);
+        let nm = text_bytes(std::str::from_utf8(&self.s[st..self.i]).map_err(|e| self.error(e))?);
         if self.peek() == Some(b'(') {
             Ok(Member::Method(MethodRef {
                 class,
@@ -812,7 +820,9 @@ impl<'a> P<'a> {
             }
             if c == b'\\' {
                 self.i += 1;
-                let e = self.peek().ok_or("unterminated string")?;
+                let e = self
+                    .peek()
+                    .ok_or_else(|| self.error("unterminated string"))?;
                 self.i += 1;
                 match e {
                     b'n' => units.push(10),
@@ -845,7 +855,7 @@ impl<'a> P<'a> {
                 _ => 4,
             };
             let ch = std::str::from_utf8(self.s.get(self.i..self.i + len).unwrap_or(&[]))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| self.error(e))?;
             let mut buf = [0u16; 2];
             units.extend_from_slice(ch.chars().next().unwrap().encode_utf16(&mut buf));
             self.i += len;
@@ -986,7 +996,7 @@ impl<'a> P<'a> {
                 self.i += 1;
             }
             let n =
-                text_bytes(std::str::from_utf8(&self.s[st..self.i]).map_err(|e| e.to_string())?);
+                text_bytes(std::str::from_utf8(&self.s[st..self.i]).map_err(|e| self.error(e))?);
             self.expect("=")?;
             out.push((n, self.value(depth + 1)?));
         }
@@ -1181,7 +1191,7 @@ fn spec_name(p: &mut P, stop: &[u8]) -> R<S> {
         return p.err("missing name");
     }
     Ok(text_bytes(
-        std::str::from_utf8(&p.s[st..p.i]).map_err(|e| e.to_string())?,
+        std::str::from_utf8(&p.s[st..p.i]).map_err(|e| p.error(e))?,
     ))
 }
 
@@ -1572,7 +1582,7 @@ fn method_p(p: &mut P) -> R<Method> {
                 i.regs[0] = a;
                 i.n = (z - a + 1)
                     .try_into()
-                    .map_err(|_| "register range too long".to_string())?;
+                    .map_err(|_| p.error("register range too long"))?;
             } else {
                 let mut n = 0;
                 loop {
@@ -1635,10 +1645,10 @@ fn method_p(p: &mut P) -> R<Method> {
     }
     for (name, id) in &labels.ids {
         if !labels.defined.contains_key(id) {
-            return Err(format!(
+            return Err(p.error(format!(
                 "{}: label {name} is used but never defined",
                 String::from_utf8_lossy(&m.name)
-            ));
+            )));
         }
     }
     if pannos.iter().any(|v| !v.is_empty()) {
@@ -1666,10 +1676,10 @@ fn method_p(p: &mut P) -> R<Method> {
             param_names: if debug { names } else { vec![None; nparams] },
         });
     } else if names.iter().any(|n| n.is_some()) {
-        return Err(format!(
+        return Err(p.error(format!(
             "{}: .param names need a method body",
             String::from_utf8_lossy(&m.name)
-        ));
+        )));
     }
     Ok(m)
 }

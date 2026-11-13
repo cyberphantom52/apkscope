@@ -1750,7 +1750,9 @@ impl App {
                 let (tx, file) = (self.tx.clone(), st.file.clone());
                 spawn(&self.tx, "save", move || {
                     let r = apksign::verify(&file).map(|l| l.join(", "));
-                    let _ = tx.send(Msg::Saved(r.map(|l| format!("Signature: {l}"))));
+                    let _ = tx.send(Msg::Saved(
+                        r.map(|l| format!("Signature: {l}")).map_err(String::from),
+                    ));
                 });
             }
             if !self.edits.is_empty() {

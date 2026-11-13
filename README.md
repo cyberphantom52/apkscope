@@ -407,7 +407,7 @@ smali::inject_into(&mut apk, &[class.replace("const/4 v0, 0x0", "const/4 v0, 0x1
 let (unsigned, _) = rebuild::rebuild_from(Cursor::new(&bytes), &edits)?;
 ```
 
-Nothing is signed unless you call `sign`. Errors are text, the way the command prints them.
+Nothing is signed unless you call `sign`. Fallible functions return `apkscope_core::Error`, a `thiserror` enum: `Io`, `Zip`, `Key` and `Rsa` keep the underlying error as their `source()`; `In` says which file or entry an error is in; `ClassNotFound` and `EntryNotFound` name what's missing; `Smali` has the line; and `Dex`, `Assemble`, `Resources`, `Xml` and `Signature` describe what is wrong with that kind of input. `Error::report()` joins a message with its causes, which is what the command prints.
 
 ## Honest limits
 

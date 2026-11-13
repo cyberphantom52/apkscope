@@ -3,20 +3,21 @@
 use super::model::*;
 use crate::bytecode::{self, Fmt};
 use crate::dex::{sleb128, uleb128};
+use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-type R<T> = Result<T, String>;
+type R<T> = Result<T>;
 
 fn u32_at(d: &[u8], o: usize) -> R<u32> {
     d.get(o..o + 4)
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-        .ok_or_else(|| format!("read past end at {o:#x}"))
+        .ok_or_else(|| Error::dex(format!("read past end at {o:#x}")))
 }
 fn u16_at(d: &[u8], o: usize) -> R<u16> {
     d.get(o..o + 2)
         .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
-        .ok_or_else(|| format!("read past end at {o:#x}"))
+        .ok_or_else(|| Error::dex(format!("read past end at {o:#x}")))
 }
 
 pub struct Reader<'a> {
@@ -43,7 +44,7 @@ pub fn read(d: &[u8]) -> R<Vec<Class>> {
 impl<'a> Reader<'a> {
     pub fn new(d: &'a [u8]) -> R<Self> {
         if d.len() < 0x70 || &d[..4] != b"dex\n" {
-            return Err("not a DEX file".into());
+            return Err(Error::dex("not a DEX file"));
         }
         let tab = |o: usize| -> R<(usize, usize)> {
             Ok((u32_at(d, o)? as usize, u32_at(d, o + 4)? as usize))
@@ -56,7 +57,7 @@ impl<'a> Reader<'a> {
                 let end = d
                     .get(o..)
                     .and_then(|t| t.iter().position(|&b| b == 0))
-                    .ok_or("unterminated string")?;
+                    .ok_or_else(|| Error::dex("unterminated string"))?;
                 Ok(s(&d[o..o + end]))
             })
             .collect::<R<Vec<S>>>()?;
@@ -64,7 +65,7 @@ impl<'a> Reader<'a> {
             strings
                 .get(i as usize)
                 .cloned()
-                .ok_or_else(|| format!("bad string id {i}"))
+                .ok_or_else(|| Error::dex(format!("bad string id {i}")))
         };
         let (nt, to) = tab(0x40)?;
         let types = (0..nt)
@@ -74,7 +75,7 @@ impl<'a> Reader<'a> {
             types
                 .get(i as usize)
                 .cloned()
-                .ok_or_else(|| format!("bad type id {i}"))
+                .ok_or_else(|| Error::dex(format!("bad type id {i}")))
         };
         let (np, po) = tab(0x48)?;
         let protos = (0..np)
@@ -112,7 +113,7 @@ impl<'a> Reader<'a> {
                 let proto = protos
                     .get(u16_at(d, o + 2)? as usize)
                     .cloned()
-                    .ok_or("bad proto id")?;
+                    .ok_or_else(|| Error::dex("bad proto id"))?;
                 Ok(MethodRef {
                     class: ty(u16_at(d, o)? as u32)?,
                     proto,
@@ -166,14 +167,14 @@ impl<'a> Reader<'a> {
                     r.fields
                         .get(id)
                         .cloned()
-                        .ok_or("bad field in method handle")?,
+                        .ok_or_else(|| Error::dex("bad field in method handle"))?,
                 )
             } else {
                 Member::Method(
                     r.methods
                         .get(id)
                         .cloned()
-                        .ok_or("bad method in method handle")?,
+                        .ok_or_else(|| Error::dex("bad method in method handle"))?,
                 )
             };
             r.handles.push(Handle { kind, member });
@@ -190,13 +191,13 @@ impl<'a> Reader<'a> {
         self.strings
             .get(i as usize)
             .cloned()
-            .ok_or_else(|| format!("bad string id {i}"))
+            .ok_or_else(|| Error::dex(format!("bad string id {i}")))
     }
     fn ty(&self, i: u32) -> R<S> {
         self.types
             .get(i as usize)
             .cloned()
-            .ok_or_else(|| format!("bad type id {i}"))
+            .ok_or_else(|| Error::dex(format!("bad type id {i}")))
     }
     fn opt_st(&self, i: u32) -> R<Option<S>> {
         if i == u32::MAX {
@@ -220,14 +221,16 @@ impl<'a> Reader<'a> {
 
     fn value(&self, o: &mut usize, depth: u32) -> R<Value> {
         if depth > 64 {
-            return Err("encoded value nesting too deep".into());
+            return Err(Error::dex("encoded value nesting too deep"));
         }
         let d = self.d;
-        let h = *d.get(*o).ok_or("value past end")?;
+        let h = *d.get(*o).ok_or_else(|| Error::dex("value past end"))?;
         *o += 1;
         let (t, arg) = (h & 0x1f, (h >> 5) as usize);
         let mut raw = |n: usize| -> R<u64> {
-            let b = d.get(*o..*o + n).ok_or("value past end")?;
+            let b = d
+                .get(*o..*o + n)
+                .ok_or_else(|| Error::dex("value past end"))?;
             *o += n;
             Ok(b.iter().rev().fold(0u64, |v, &x| v << 8 | x as u64))
         };
@@ -245,13 +248,13 @@ impl<'a> Reader<'a> {
                 self.protos
                     .get(idx(raw(arg + 1)?) as usize)
                     .cloned()
-                    .ok_or("bad proto")?,
+                    .ok_or_else(|| Error::dex("bad proto"))?,
             ),
             0x16 => Value::MethodHandle(Box::new(
                 self.handles
                     .get(idx(raw(arg + 1)?) as usize)
                     .cloned()
-                    .ok_or("bad method handle")?,
+                    .ok_or_else(|| Error::dex("bad method handle"))?,
             )),
             0x17 => Value::Str(self.st(idx(raw(arg + 1)?))?),
             0x18 => Value::Type(self.ty(idx(raw(arg + 1)?))?),
@@ -259,19 +262,19 @@ impl<'a> Reader<'a> {
                 self.fields
                     .get(idx(raw(arg + 1)?) as usize)
                     .cloned()
-                    .ok_or("bad field")?,
+                    .ok_or_else(|| Error::dex("bad field"))?,
             ),
             0x1a => Value::Method(
                 self.methods
                     .get(idx(raw(arg + 1)?) as usize)
                     .cloned()
-                    .ok_or("bad method")?,
+                    .ok_or_else(|| Error::dex("bad method"))?,
             ),
             0x1b => Value::Enum(
                 self.fields
                     .get(idx(raw(arg + 1)?) as usize)
                     .cloned()
-                    .ok_or("bad field")?,
+                    .ok_or_else(|| Error::dex("bad field"))?,
             ),
             0x1c => {
                 let n = uleb128(d, o)?;
@@ -280,7 +283,7 @@ impl<'a> Reader<'a> {
             0x1d => Value::Anno(self.anno(o, 0, depth + 1)?),
             0x1e => Value::Null,
             0x1f => Value::Bool(arg != 0),
-            t => return Err(format!("bad encoded value type {t:#x}")),
+            t => return Err(Error::dex(format!("bad encoded value type {t:#x}"))),
         })
     }
 
@@ -302,7 +305,10 @@ impl<'a> Reader<'a> {
         (0..u32_at(self.d, off)? as usize)
             .map(|k| {
                 let mut o = u32_at(self.d, off + 4 + k * 4)? as usize;
-                let vis = *self.d.get(o).ok_or("annotation past end")?;
+                let vis = *self
+                    .d
+                    .get(o)
+                    .ok_or_else(|| Error::dex("annotation past end"))?;
                 o += 1;
                 self.anno(&mut o, vis, 0)
             })
@@ -432,7 +438,10 @@ impl<'a> Reader<'a> {
                 for _ in 0..count {
                     idx += uleb128(d, &mut off)?;
                     let access = uleb128(d, &mut off)?;
-                    let f = self.fields.get(idx as usize).ok_or("bad field id")?;
+                    let f = self
+                        .fields
+                        .get(idx as usize)
+                        .ok_or_else(|| Error::dex("bad field id"))?;
                     let init = if k == 0 { statics.next() } else { None };
                     c.fields.push(Field {
                         name: f.name.clone(),
@@ -450,7 +459,10 @@ impl<'a> Reader<'a> {
                     idx += uleb128(d, &mut off)?;
                     let access = uleb128(d, &mut off)?;
                     let code_off = uleb128(d, &mut off)? as usize;
-                    let m = self.methods.get(idx as usize).ok_or("bad method id")?;
+                    let m = self
+                        .methods
+                        .get(idx as usize)
+                        .ok_or_else(|| Error::dex("bad method id"))?;
                     let mut method = Method {
                         name: m.name.clone(),
                         proto: m.proto.clone(),
@@ -471,11 +483,11 @@ impl<'a> Reader<'a> {
                         method.code = Some(
                             self.code(code_off, method.proto.params.len())
                                 .map_err(|e| {
-                                    format!(
-                                        "{}->{}: {e}",
+                                    e.at(format!(
+                                        "{}->{}",
                                         String::from_utf8_lossy(&c.name),
                                         String::from_utf8_lossy(&method.name)
-                                    )
+                                    ))
                                 })?,
                         );
                     }
@@ -492,12 +504,14 @@ impl<'a> Reader<'a> {
         let ntries = u16_at(d, co + 6)? as usize;
         let debug_off = u32_at(d, co + 8)? as usize;
         let units = u32_at(d, co + 12)? as usize;
-        let insns = d.get(co + 16..co + 16 + units * 2).ok_or("code past end")?;
+        let insns = d
+            .get(co + 16..co + 16 + units * 2)
+            .ok_or_else(|| Error::dex("code past end"))?;
         let unit = |pc: usize| -> R<u32> {
             insns
                 .get(pc * 2..pc * 2 + 2)
                 .map(|b| u16::from_le_bytes([b[0], b[1]]) as u32)
-                .ok_or_else(|| format!("payload past end at {pc:#x}"))
+                .ok_or_else(|| Error::dex(format!("payload past end at {pc:#x}")))
         };
         let decoded = bytecode::decode(insns)?;
 
@@ -536,31 +550,31 @@ impl<'a> Reader<'a> {
                     self.fields
                         .get(i.idx as usize)
                         .cloned()
-                        .ok_or("bad field id")?,
+                        .ok_or_else(|| Error::dex("bad field id"))?,
                 ),
                 bytecode::Ref::Method => Ref::Method(
                     self.methods
                         .get(i.idx as usize)
                         .cloned()
-                        .ok_or("bad method id")?,
+                        .ok_or_else(|| Error::dex("bad method id"))?,
                 ),
                 bytecode::Ref::Proto => Ref::Proto(
                     self.protos
                         .get(i.idx as usize)
                         .cloned()
-                        .ok_or("bad proto id")?,
+                        .ok_or_else(|| Error::dex("bad proto id"))?,
                 ),
                 bytecode::Ref::CallSite => Ref::CallSite(
                     self.call_sites
                         .get(i.idx as usize)
                         .cloned()
-                        .ok_or("bad call site id")?,
+                        .ok_or_else(|| Error::dex("bad call site id"))?,
                 ),
                 bytecode::Ref::MethodHandle => Ref::Handle(
                     self.handles
                         .get(i.idx as usize)
                         .cloned()
-                        .ok_or("bad method handle id")?,
+                        .ok_or_else(|| Error::dex("bad method handle id"))?,
                 ),
             };
             if matches!(f, Fmt::F45cc | Fmt::F4rcc) {
@@ -568,7 +582,7 @@ impl<'a> Reader<'a> {
                     self.protos
                         .get(i.idx2 as usize)
                         .cloned()
-                        .ok_or("bad proto id")?,
+                        .ok_or_else(|| Error::dex("bad proto id"))?,
                 );
             }
             at.entry(i.off).or_default().push(Item::Ins(ins));
@@ -611,11 +625,11 @@ impl<'a> Reader<'a> {
                     let start = (p + 4) * 2;
                     let data = insns
                         .get(start..start + n * width as usize)
-                        .ok_or("array data past end")?
+                        .ok_or_else(|| Error::dex("array data past end"))?
                         .to_vec();
                     Item::Array { width, data }
                 }
-                w => return Err(format!("bad payload {w:#x} at {p:#x}")),
+                w => return Err(Error::dex(format!("bad payload {w:#x} at {p:#x}"))),
             };
             at.entry(p as u32).or_default().push(item);
             // the nop just before an aligned payload is padding; the writer re-adds it
@@ -660,7 +674,7 @@ impl<'a> Reader<'a> {
             }
             let mut addr = 0u32;
             loop {
-                let op = *d.get(o).ok_or("debug info past end")?;
+                let op = *d.get(o).ok_or_else(|| Error::dex("debug info past end"))?;
                 o += 1;
                 let ev = match op {
                     0 => break,

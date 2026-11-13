@@ -4,10 +4,11 @@
 use super::model::*;
 use super::read;
 use crate::bytecode::{self, Fmt};
+use crate::{Error, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-type R<T> = Result<T, String>;
+type R<T> = Result<T>;
 const NO_INDEX: u32 = u32::MAX;
 
 fn uleb(out: &mut Vec<u8>, mut v: u32) {
@@ -290,9 +291,9 @@ impl Pools {
             ("methods", methods.len()),
         ] {
             if n > 0x10000 {
-                return Err(format!(
+                return Err(Error::assemble(format!(
                     "too many {what} for one DEX file ({n}, the limit is 65536)"
-                ));
+                )));
             }
         }
         let hi = c
@@ -431,7 +432,7 @@ fn fits(v: i64, bits: u32) -> bool {
 }
 
 fn assemble(code: &Code, p: &Pools, what: &dyn Fn() -> String) -> R<Assembled> {
-    let err = |m: String| format!("{}: {m}", what());
+    let err = |m: String| Error::assemble(format!("{}: {m}", what()));
     // choose final opcodes: const-string widens past 65535 strings, gotos widen to reach
     let mut ops: Vec<u8> = code
         .items
@@ -886,7 +887,7 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
         .map(|(i, c)| (&*c.name, i))
         .collect();
     if by_name.len() != classes.len() {
-        return Err("a class is defined twice".into());
+        return Err(Error::assemble("a class is defined twice"));
     }
     let mut order = Vec::with_capacity(classes.len());
     let mut state = vec![0u8; classes.len()];
@@ -900,10 +901,10 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
         match st[i] {
             2 => return Ok(()),
             1 => {
-                return Err(format!(
+                return Err(Error::assemble(format!(
                     "class {} inherits from itself",
                     String::from_utf8_lossy(&cs[i].name)
-                ));
+                )));
             }
             _ => {}
         }
@@ -1210,12 +1211,12 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
                         )
                     };
                     if m.ins() > code.registers {
-                        return Err(format!(
+                        return Err(Error::assemble(format!(
                             "{}: .registers {} is less than the {} the parameters need",
                             what(),
                             code.registers,
                             m.ins()
-                        ));
+                        )));
                     }
                     Some((assemble(code, &p, &what)?, m.ins()))
                 }
@@ -1437,10 +1438,10 @@ pub fn write(classes: &[Class], version: [u8; 3]) -> R<Vec<u8>> {
             let mut prev = 0;
             for &(i, a, co, _) in list.iter() {
                 if i == prev && prev != 0 {
-                    return Err(format!(
+                    return Err(Error::assemble(format!(
                         "{}: method defined twice",
                         String::from_utf8_lossy(&c.name)
-                    ));
+                    )));
                 }
                 uleb(o, i - prev);
                 uleb(o, a);

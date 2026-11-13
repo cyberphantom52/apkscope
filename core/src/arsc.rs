@@ -4,20 +4,21 @@
 use std::collections::BTreeMap;
 
 use crate::res::{qualifier, string_pool};
+use crate::{Error, Result};
 
-fn u16_at(d: &[u8], o: usize) -> Result<u16, String> {
+fn u16_at(d: &[u8], o: usize) -> Result<u16> {
     Ok(u16::from_le_bytes(
         d.get(o..o + 2)
-            .ok_or("truncated resources.arsc")?
+            .ok_or_else(|| Error::resources("truncated resources.arsc"))?
             .try_into()
             .unwrap(),
     ))
 }
 
-fn u32_at(d: &[u8], o: usize) -> Result<u32, String> {
+fn u32_at(d: &[u8], o: usize) -> Result<u32> {
     Ok(u32::from_le_bytes(
         d.get(o..o + 4)
-            .ok_or("truncated resources.arsc")?
+            .ok_or_else(|| Error::resources("truncated resources.arsc"))?
             .try_into()
             .unwrap(),
     ))
@@ -35,9 +36,9 @@ pub struct StringRes {
 }
 
 /// Every simple `string` resource of the first package, in every config.
-pub fn strings(d: &[u8]) -> Result<Vec<StringRes>, String> {
+pub fn strings(d: &[u8]) -> Result<Vec<StringRes>> {
     if u16_at(d, 0)? != 0x0002 {
-        return Err("not a resource table".into());
+        return Err(Error::resources("not a resource table"));
     }
     let mut values = Vec::new();
     let mut out = Vec::new();
@@ -82,7 +83,7 @@ fn type_strings(
     keys: &[String],
     values: &[String],
     out: &mut Vec<StringRes>,
-) -> Result<(), String> {
+) -> Result<()> {
     let flags = d[c + 9];
     let count = u32_at(d, c + 12)? as usize;
     let entries = c + u32_at(d, c + 16)? as usize;
@@ -154,23 +155,24 @@ fn encode(s: &str, utf8: bool) -> Vec<u8> {
 }
 
 /// Change string values. `changes`: (config, name) -> new text.
-pub fn set_strings(
-    d: &[u8],
-    changes: &BTreeMap<(String, String), String>,
-) -> Result<Vec<u8>, String> {
+pub fn set_strings(d: &[u8], changes: &BTreeMap<(String, String), String>) -> Result<Vec<u8>> {
     let all = strings(d)?;
     let mut targets = Vec::new();
     for ((config, name), text) in changes {
         let r = all
             .iter()
             .find(|r| &r.config == config && &r.name == name)
-            .ok_or_else(|| format!("no string resource {name} in config \"{config}\""))?;
+            .ok_or_else(|| {
+                Error::resources(format!("no string resource {name} in config \"{config}\""))
+            })?;
         targets.push((r.at, text.clone()));
     }
     // the global string pool is the table's first chunk
     let pool = u16_at(d, 2)? as usize;
     if u16_at(d, pool)? != 0x0001 {
-        return Err("resources.arsc has no global string pool first".into());
+        return Err(Error::resources(
+            "resources.arsc has no global string pool first",
+        ));
     }
     let (psize, count, styles, flags) = (
         u32_at(d, pool + 4)? as usize,

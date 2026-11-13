@@ -469,11 +469,11 @@ impl State {
             .names
             .as_ref()
             .ok_or("this APK has no resources.arsc to resolve @references")?;
-        crate::axml::encode(
+        Ok(crate::axml::encode(
             text,
             self.read_entry("AndroidManifest.xml").as_deref(),
             names,
-        )
+        )?)
     }
 
     pub fn read_entry(&self, name: &str) -> Option<Vec<u8>> {
@@ -1627,7 +1627,7 @@ pub fn smali(dx: &Dex, c: usize) -> String {
                         out,
                         "    {:04x}: {}",
                         i.off,
-                        crate::render(dx, &i).unwrap_or_else(|e| e)
+                        crate::render(dx, &i).unwrap_or_else(|e| e.to_string())
                     );
                 }
             }

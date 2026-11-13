@@ -1,6 +1,8 @@
 //! Dalvik instruction decoder. Spec: https://source.android.com/docs/core/runtime/dalvik-bytecode
 //! and https://source.android.com/docs/core/runtime/instruction-formats
 
+use crate::{Error, Result};
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Fmt {
     F10x,
@@ -329,7 +331,7 @@ pub fn for_each_ref(insns: &[u8], mut f: impl FnMut(Ref, u32)) {
 
 /// Decode a whole method body. `insns` is little-endian code units.
 /// Switch / array payload pseudo-instructions are skipped, not returned.
-pub fn decode(insns: &[u8]) -> Result<Vec<Insn>, String> {
+pub fn decode(insns: &[u8]) -> Result<Vec<Insn>> {
     let w: Vec<u16> = insns
         .as_chunks::<2>()
         .0
@@ -343,7 +345,7 @@ pub fn decode(insns: &[u8]) -> Result<Vec<Insn>, String> {
             w.get(pc + i)
                 .copied()
                 .map(u32::from)
-                .ok_or_else(|| format!("truncated insn at {pc:#x}"))
+                .ok_or_else(|| Error::dex(format!("truncated insn at {pc:#x}")))
         };
         let w0 = u(0)?;
         let op = (w0 & 0xff) as u8;
@@ -353,11 +355,12 @@ pub fn decode(insns: &[u8]) -> Result<Vec<Insn>, String> {
                 0x0100 => 4 + u(1)? as usize * 2,
                 0x0200 => 2 + u(1)? as usize * 4,
                 0x0300 => 4 + ((u(2)? | u(3)? << 16) as usize * u(1)? as usize).div_ceil(2),
-                _ => return Err(format!("bad payload {w0:#x} at {pc:#x}")),
+                _ => return Err(Error::dex(format!("bad payload {w0:#x} at {pc:#x}"))),
             };
             continue;
         }
-        let (_, f, _) = info(op).ok_or_else(|| format!("unused opcode {op:#x} at {pc:#x}"))?;
+        let (_, f, _) =
+            info(op).ok_or_else(|| Error::dex(format!("unused opcode {op:#x} at {pc:#x}")))?;
         let mut i = Insn {
             off: pc as u32,
             op,
@@ -429,7 +432,7 @@ pub fn decode(insns: &[u8]) -> Result<Vec<Insn>, String> {
                 let all = [x & 0xf, (x >> 4) & 0xf, (x >> 8) & 0xf, x >> 12, a4];
                 let n = b4 as usize;
                 if n > 5 {
-                    return Err(format!("bad arg count at {pc:#x}"));
+                    return Err(Error::dex(format!("bad arg count at {pc:#x}")));
                 }
                 set(&all[..n]);
                 i.idx = u(1)?;

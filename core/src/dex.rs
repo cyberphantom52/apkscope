@@ -1,5 +1,7 @@
 //! Minimal DEX table reader. Spec: https://source.android.com/docs/core/runtime/dex-format
 
+use crate::{Error, Result};
+
 pub struct Dex<'a> {
     data: &'a [u8],
     string_ids: usize,
@@ -58,12 +60,12 @@ pub struct ClassData<'a> {
     pub methods: Vec<Method<'a>>,
 }
 
-type R<T> = Result<T, String>;
+type R<T> = Result<T>;
 
 fn bytes<const N: usize>(d: &[u8], off: usize) -> R<[u8; N]> {
     d.get(off..off + N)
         .map(|b| b.try_into().unwrap())
-        .ok_or_else(|| format!("read past end at {off:#x}"))
+        .ok_or_else(|| Error::dex(format!("read past end at {off:#x}")))
 }
 fn u32_at(d: &[u8], off: usize) -> R<u32> {
     bytes(d, off).map(u32::from_le_bytes)
@@ -75,14 +77,14 @@ fn u16_at(d: &[u8], off: usize) -> R<u16> {
 pub fn uleb128(d: &[u8], off: &mut usize) -> R<u32> {
     let mut v = 0u32;
     for shift in (0..35).step_by(7) {
-        let b = *d.get(*off).ok_or("uleb128 past end")?;
+        let b = *d.get(*off).ok_or_else(|| Error::dex("uleb128 past end"))?;
         *off += 1;
         v |= ((b & 0x7f) as u32) << shift;
         if b & 0x80 == 0 {
             return Ok(v);
         }
     }
-    Err("uleb128 too long".into())
+    Err(Error::dex("uleb128 too long"))
 }
 
 pub fn sleb128(d: &[u8], off: &mut usize) -> R<i32> {
@@ -136,7 +138,7 @@ pub fn parse_tries(d: &[u8], code_off: usize, units: usize) -> R<Vec<Try>> {
 impl<'a> Dex<'a> {
     pub fn parse(data: &'a [u8]) -> R<Self> {
         if data.len() < 0x70 || &data[..4] != b"dex\n" {
-            return Err("not a DEX file".into());
+            return Err(Error::dex("not a DEX file"));
         }
         let dex = Dex {
             data,
@@ -152,7 +154,7 @@ impl<'a> Dex<'a> {
         };
         // validate table bounds once so lookups only fail on corrupt indices
         if dex.class_defs + dex.class_count * 32 > data.len() {
-            return Err("class_defs out of bounds".into());
+            return Err(Error::dex("class_defs out of bounds"));
         }
         Ok(dex)
     }
@@ -168,7 +170,7 @@ impl<'a> Dex<'a> {
         let end = self.data[off..]
             .iter()
             .position(|&b| b == 0)
-            .ok_or("unterminated string")?;
+            .ok_or_else(|| Error::dex("unterminated string"))?;
         Ok(mutf8(&self.data[off..off + end]))
     }
 
@@ -180,7 +182,7 @@ impl<'a> Dex<'a> {
             .data
             .get(off..)
             .and_then(|d| d.iter().position(|&b| b == 0))
-            .ok_or("unterminated string")?;
+            .ok_or_else(|| Error::dex("unterminated string"))?;
         Ok(&self.data[off..off + end])
     }
 
@@ -404,7 +406,7 @@ impl<'a> Dex<'a> {
                     let units = u32_at(d, code_off + 12)? as usize;
                     let insns = d
                         .get(code_off + 16..code_off + 16 + units * 2)
-                        .ok_or("code past end")?;
+                        .ok_or_else(|| Error::dex("code past end"))?;
                     let tries = parse_tries(d, code_off, units)?;
                     Some(Code {
                         registers: u16_at(d, code_off)?,
@@ -512,7 +514,7 @@ impl<'a> Dex<'a> {
                     let units = u32_at(d, code_off + 12)? as usize;
                     Some(
                         d.get(code_off + 16..code_off + 16 + units * 2)
-                            .ok_or("code past end")?,
+                            .ok_or_else(|| Error::dex("code past end"))?,
                     )
                 };
                 f(idx, code);
@@ -567,13 +569,15 @@ pub struct Annotations {
 
 fn encoded_value(d: &[u8], off: &mut usize, depth: u32) -> R<Value> {
     if depth > 32 {
-        return Err("annotation nesting too deep".into());
+        return Err(Error::dex("annotation nesting too deep"));
     }
-    let h = *d.get(*off).ok_or("value past end")?;
+    let h = *d.get(*off).ok_or_else(|| Error::dex("value past end"))?;
     *off += 1;
     let (ty, arg) = (h & 0x1f, (h >> 5) as usize);
     let mut raw = |n: usize| -> R<u64> {
-        let b = d.get(*off..*off + n).ok_or("value past end")?;
+        let b = d
+            .get(*off..*off + n)
+            .ok_or_else(|| Error::dex("value past end"))?;
         *off += n;
         Ok(b.iter().rev().fold(0u64, |v, &x| v << 8 | x as u64))
     };
@@ -607,7 +611,7 @@ fn encoded_value(d: &[u8], off: &mut usize, depth: u32) -> R<Value> {
         0x1d => Value::Annotation(encoded_annotation(d, off, 3, depth + 1)?),
         0x1e => Value::Null,
         0x1f => Value::Bool(arg != 0),
-        t => return Err(format!("bad encoded value type {t:#x}")),
+        t => return Err(Error::dex(format!("bad encoded value type {t:#x}"))),
     })
 }
 
@@ -634,7 +638,7 @@ fn annotation_set(d: &[u8], off: usize) -> R<Vec<Annotation>> {
     (0..n)
         .map(|k| {
             let mut o = u32_at(d, off + 4 + k * 4)? as usize;
-            let vis = *d.get(o).ok_or("annotation past end")?;
+            let vis = *d.get(o).ok_or_else(|| Error::dex("annotation past end"))?;
             o += 1;
             encoded_annotation(d, &mut o, vis, 0)
         })
@@ -736,7 +740,7 @@ pub fn descriptor(name: &str) -> String {
 }
 
 /// One instruction as text, its references resolved: `invoke-virtual {v0}, La/B;->c()V`.
-pub fn render(dex: &Dex, i: &crate::bytecode::Insn) -> Result<String, String> {
+pub fn render(dex: &Dex, i: &crate::bytecode::Insn) -> Result<String> {
     use crate::bytecode::{self, Fmt::*, Ref};
     let (name, f, r) = bytecode::info(i.op).unwrap();
     let mut parts = Vec::new();
