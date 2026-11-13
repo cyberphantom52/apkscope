@@ -177,40 +177,49 @@ fn spec(o: &mut Vec<u8>, s: &Spec) {
 
 fn type_chunk(o: &mut Vec<u8>, t: &Type) {
     let mut data = Vec::new();
+    let mut at = Vec::with_capacity(t.entries.len());
+    for e in &t.entries {
+        at.push(e.as_ref().map(|e| {
+            let offset = data.len();
+            entry(&mut data, e);
+            offset
+        }));
+    }
+    // a sparse or 16-bit-offset layout that an edit outgrew is written dense
+    let fits16 = |o: &usize| o / 4 < 0xffff;
+    let mut flags = t.flags;
+    if flags & Type::SPARSE != 0 && (at.len() > 0x10000 || !at.iter().flatten().all(fits16)) {
+        flags &= !Type::SPARSE;
+    }
+    if flags & Type::OFFSET16 != 0 && !at.iter().flatten().all(fits16) {
+        flags &= !Type::OFFSET16;
+    }
     let mut offsets = Vec::new();
-    let present = t.entries.iter().filter(|e| e.is_some()).count();
-    for (index, e) in t.entries.iter().enumerate() {
-        let Some(e) = e else {
-            if t.flags & Type::SPARSE == 0 {
-                if t.flags & Type::OFFSET16 != 0 {
-                    u16(&mut offsets, 0xffff);
-                } else {
-                    u32(&mut offsets, u32::MAX);
-                }
+    for (index, offset) in at.iter().enumerate() {
+        match (
+            flags & Type::SPARSE != 0,
+            flags & Type::OFFSET16 != 0,
+            offset,
+        ) {
+            (true, _, None) => {}
+            (true, _, Some(o)) => {
+                u16(&mut offsets, index as u16);
+                u16(&mut offsets, (o / 4) as u16);
             }
-            continue;
-        };
-        let at = data.len();
-        if t.flags & Type::SPARSE != 0 {
-            u16(&mut offsets, index as u16);
-            u16(&mut offsets, (at / 4) as u16);
-        } else if t.flags & Type::OFFSET16 != 0 {
-            u16(&mut offsets, (at / 4) as u16);
-        } else {
-            u32(&mut offsets, at as u32);
+            (false, true, o) => u16(&mut offsets, o.map_or(0xffff, |o| (o / 4) as u16)),
+            (false, false, o) => u32(&mut offsets, o.map_or(u32::MAX, |o| o as u32)),
         }
-        entry(&mut data, e);
     }
     pad4(&mut offsets);
     let header = 20 + t.config.len();
-    let count = if t.flags & Type::SPARSE != 0 {
-        present
+    let count = if flags & Type::SPARSE != 0 {
+        at.iter().flatten().count()
     } else {
-        t.entries.len()
+        at.len()
     };
     chunk(o, RES_TABLE_TYPE, header as u16, |o| {
         o.push(t.id);
-        o.push(t.flags);
+        o.push(flags);
         u16(o, t.reserved);
         u32(o, count as u32);
         u32(o, (header + offsets.len()) as u32);
@@ -222,20 +231,21 @@ fn type_chunk(o: &mut Vec<u8>, t: &Type) {
 
 fn entry(o: &mut Vec<u8>, e: &Entry) {
     match &e.value {
-        EntryValue::Simple(v) if e.flags & Entry::COMPACT != 0 => {
+        // a compact entry holds its key in 16 bits
+        EntryValue::Simple(v) if e.flags & Entry::COMPACT != 0 && e.key <= 0xffff => {
             u16(o, e.key as u16);
             u16(o, e.flags | (v.ty as u16) << 8);
             u32(o, v.data);
         }
         EntryValue::Simple(v) => {
             u16(o, 8);
-            u16(o, e.flags);
+            u16(o, e.flags & !Entry::COMPACT);
             u32(o, e.key);
             value(o, *v);
         }
         EntryValue::Complex { parent, map } => {
             u16(o, 16);
-            u16(o, e.flags);
+            u16(o, (e.flags | Entry::COMPLEX) & !Entry::COMPACT);
             u32(o, e.key);
             u32(o, *parent);
             u32(o, map.len() as u32);

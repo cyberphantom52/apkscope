@@ -3,6 +3,8 @@
 //!
 //! Format: `frameworks/base/libs/androidfw/include/androidfw/ResourceTypes.h` in AOSP.
 
+pub mod config;
+mod edit;
 pub mod read;
 pub mod write;
 
@@ -113,11 +115,32 @@ pub enum EntryValue {
     },
 }
 
-/// `Res_value`: a type (`TYPE_STRING`, `TYPE_INT_DEC`, ...) and its data.
+/// `Res_value`: a type and its data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Value {
     pub ty: u8,
     pub data: u32,
+}
+
+impl Value {
+    pub const NULL: u8 = 0x00;
+    pub const REFERENCE: u8 = 0x01;
+    pub const ATTRIBUTE: u8 = 0x02;
+    /// An index into the table's global [`Table::strings`].
+    pub const STRING: u8 = 0x03;
+    pub const FLOAT: u8 = 0x04;
+    pub const DIMENSION: u8 = 0x05;
+    pub const FRACTION: u8 = 0x06;
+    pub const DYNAMIC_REFERENCE: u8 = 0x07;
+    pub const DYNAMIC_ATTRIBUTE: u8 = 0x08;
+    pub const INT_DEC: u8 = 0x10;
+    pub const INT_HEX: u8 = 0x11;
+    /// 0 or `0xffffffff`.
+    pub const INT_BOOLEAN: u8 = 0x12;
+    pub const INT_COLOR_ARGB8: u8 = 0x1c;
+    pub const INT_COLOR_RGB8: u8 = 0x1d;
+    pub const INT_COLOR_ARGB4: u8 = 0x1e;
+    pub const INT_COLOR_RGB4: u8 = 0x1f;
 }
 
 #[cfg(test)]
