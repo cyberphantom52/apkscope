@@ -162,7 +162,7 @@ pub fn resources(apk: &mut Apk, main_dir: &Path) -> Result<(ResStats, Option<Man
     let mut st = ResStats::default();
     let table = apk
         .read("resources.arsc")
-        .map(|d| crate::res::parse_table(&d))
+        .map(|d| apkscope_core::table::read(&d))
         .transpose()?;
     let names = table.as_ref().map(crate::res::Names::new);
     let mut manifest = None;

@@ -315,7 +315,7 @@ pub fn load(path: &str, deobf: bool) -> Result<State, String> {
         .collect();
     let table = apk
         .read("resources.arsc")
-        .and_then(|d| res::parse_table(&d).ok());
+        .and_then(|d| apkscope_core::table::read(&d).ok());
     let names = table.as_ref().map(res::Names::new);
     let mut texts = BTreeMap::new();
     let mut files = BTreeMap::new();

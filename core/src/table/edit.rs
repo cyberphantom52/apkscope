@@ -32,6 +32,17 @@ impl Table {
     pub fn package_mut(&mut self, id: u32) -> Option<&mut Package> {
         self.packages.iter_mut().find(|p| p.id == id)
     }
+
+    /// The app's own package, `0x7f`, or the first if there is none: some apps put a library
+    /// package first.
+    pub fn app(&self) -> Option<&Package> {
+        self.package(0x7f).or(self.packages.first())
+    }
+
+    pub fn app_mut(&mut self) -> Option<&mut Package> {
+        let id = self.app()?.id;
+        self.package_mut(id)
+    }
 }
 
 /// `0xPPTTEEEE`: package, type and entry index.
@@ -354,13 +365,15 @@ mod tests {
         assert!(!p.remove(hello, &night));
         assert_eq!(p.spec(1).unwrap().flags[0], 0);
 
-        // what was written reads back the same, and the older reader sees the new entries
+        // what was written reads back the same, and decodes to the values put in
         let bytes = write(&t);
-        assert_eq!(read(&bytes).unwrap(), t);
-        let old = crate::res::parse_table(&bytes).unwrap();
-        assert_eq!(old.types, ["string", "bool"]);
-        assert!(old.configs.keys().any(|(ty, q)| *ty == 2 && q == "-night"));
-        assert_eq!(old.configs[&(1, String::new())].len(), 2);
+        let back = read(&bytes).unwrap();
+        assert_eq!(back, t);
+        let names = crate::res::Names::new(&back);
+        let decoded = crate::res::decode_table(&back, &names).values;
+        assert!(decoded["values/strings.xml"].contains("<string name=\"other\">Hello</string>"));
+        assert!(decoded["values-night/bools.xml"].contains("<bool name=\"on\">true</bool>"));
+        assert!(!decoded.contains_key("values-night/strings.xml"));
     }
 
     #[test]

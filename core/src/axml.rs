@@ -616,13 +616,14 @@ mod tests {
 
     #[test]
     fn types_and_complex() {
-        let names = crate::res::Names::new(&crate::res::Table {
-            package: String::new(),
-            id: 0x7f,
-            values: vec![],
-            types: vec![],
-            keys: vec![],
-            configs: Default::default(),
+        let names = crate::res::Names::new(&crate::table::Table {
+            strings: crate::table::StringPool {
+                utf8: true,
+                sorted: false,
+                strings: vec![],
+                styles: vec![],
+            },
+            packages: vec![],
         });
         assert_eq!(
             typed("true", None, &names).unwrap(),
@@ -652,7 +653,7 @@ mod tests {
                 continue;
             }
             let mut a = crate::apk::open(apk).unwrap();
-            let table = crate::res::parse_table(&a.read("resources.arsc").unwrap()).unwrap();
+            let table = crate::table::read(&a.read("resources.arsc").unwrap()).unwrap();
             let names = crate::res::Names::new(&table);
             let bin = a.read("AndroidManifest.xml").unwrap();
             let text = crate::res::decode_xml(&bin, Some(&names)).unwrap();

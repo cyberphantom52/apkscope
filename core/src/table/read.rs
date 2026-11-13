@@ -62,7 +62,8 @@ pub fn read(d: &[u8]) -> Result<Table> {
     })
 }
 
-fn pool(d: &[u8], at: usize) -> Result<StringPool> {
+/// The string pool chunk at `at`: in a table, or in binary XML.
+pub(crate) fn pool(d: &[u8], at: usize) -> Result<StringPool> {
     let count = u32_at(d, at + 8)? as usize;
     let style_count = u32_at(d, at + 12)? as usize;
     let flags = u32_at(d, at + 16)?;

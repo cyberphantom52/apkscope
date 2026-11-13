@@ -457,8 +457,9 @@ fn il2cpp_cmd(mut a: Vec<String>) -> Result<(), String> {
 
 fn manifest_cmd(apk: &str) -> Result<(), String> {
     let m = quick::read_entry(apk, "AndroidManifest.xml")?.ok_or("no AndroidManifest.xml")?;
-    let names =
-        quick::read_entry(apk, "resources.arsc")?.and_then(|d| res::Names::from_arsc(&d).ok());
+    let table =
+        quick::read_entry(apk, "resources.arsc")?.and_then(|d| apkscope_core::table::read(&d).ok());
+    let names = table.as_ref().map(res::Names::new);
     emit(&res::decode_xml(&m, names.as_ref())?)
 }
 
@@ -823,7 +824,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
         let mut a = export::open(&src)?;
         let table = a
             .read("resources.arsc")
-            .and_then(|d| res::parse_table(&d).ok());
+            .and_then(|d| apkscope_core::table::read(&d).ok());
         let names = table
             .as_ref()
             .map(res::Names::new)
