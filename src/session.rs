@@ -199,10 +199,11 @@ pub struct State {
 }
 
 /// What apkscope opens, for file dialogs and the start screen.
-pub const INPUTS: [&str; 4] = ["apk", "apks", "xapk", "dex"];
+pub const INPUTS: [&str; 5] = ["apk", "jar", "apks", "xapk", "dex"];
 
-/// Turn any supported input into an APK path: split bundles (`.apks`, `.xapk`) give their
-/// `base.apk`, a bare `.dex` is wrapped in a minimal APK. Both land in the cache folder.
+/// Turn any supported input into an APK path: a `.jar` of DEX files (Android's framework JARs)
+/// reads as one, split bundles (`.apks`, `.xapk`) give their `base.apk`, a bare `.dex` is
+/// wrapped in a minimal APK. Both land in the cache folder.
 pub fn prepare(path: &str) -> Result<String, String> {
     use std::io::{Read, Write};
     let ext = std::path::Path::new(path)
@@ -214,7 +215,7 @@ pub fn prepare(path: &str) -> Result<String, String> {
         .map_or("input".into(), |s| s.to_string_lossy().into_owned());
     let dir = cache::root().join("inputs");
     match ext.as_str() {
-        "apk" => Ok(path.to_string()),
+        "apk" | "jar" => Ok(path.to_string()),
         "apks" | "xapk" => {
             let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
             let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{path}: {e}"))?;
