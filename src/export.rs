@@ -110,9 +110,9 @@ pub fn sources(apk: &Apk, src_dir: &Path, deobf: bool) -> (usize, usize) {
     let mut jobs = Vec::new();
     for (d, dex) in dexes.iter().enumerate() {
         let nest = dex.nesting();
-        for c in 0..dex.class_count {
+        for (c, parent) in nest.parent.iter().enumerate() {
             // inner classes are written inside their outer class's file
-            if nest.parent[c].is_some() {
+            if parent.is_some() {
                 continue;
             }
             if let Ok(desc) = dex.class_descriptor(c)

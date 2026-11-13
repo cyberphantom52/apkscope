@@ -1423,11 +1423,11 @@ fn method_p(p: &mut P) -> R<Method> {
             proto: None,
         };
         let regs = |p: &mut P, k: usize, i: &mut Ins| -> R<()> {
-            for j in 0..k {
+            for (j, slot) in i.regs[..k].iter_mut().enumerate() {
                 if j > 0 {
                     p.expect(",")?;
                 }
-                i.regs[j] = p.reg(b)?;
+                *slot = p.reg(b)?;
             }
             i.n = k as u8;
             Ok(())

@@ -297,8 +297,8 @@ pub fn load(path: &str, deobf: bool) -> Result<State, String> {
     let mut seen = std::collections::HashSet::new();
     for (d, dx) in dexes.iter().enumerate() {
         let nest = dx.nesting();
-        for c in 0..dx.class_count {
-            if nest.parent[c].is_none()
+        for (c, parent) in nest.parent.iter().enumerate() {
+            if parent.is_none()
                 && let Ok(desc) = dx.class_descriptor(c)
                 && seen.insert(desc.clone())
             {

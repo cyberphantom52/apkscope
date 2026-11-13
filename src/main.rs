@@ -564,7 +564,7 @@ fn decompile(path: &str, class: Option<&str>, deobf: bool) -> Result<(), String>
     let mut found = false;
     'all: for dex in &dexes {
         let nest = dex.nesting();
-        for c in 0..dex.class_count {
+        for (c, parent) in nest.parent.iter().enumerate() {
             let desc = dex.class_descriptor(c).unwrap_or_default();
             // accept the readable name or the original one
             let raw = desc
@@ -573,7 +573,7 @@ fn decompile(path: &str, class: Option<&str>, deobf: bool) -> Result<(), String>
                 .replace('/', ".");
             match class {
                 Some(want) if want != dex::java_name(&desc) && want != raw => continue,
-                None if nest.parent[c].is_some() => continue, // printed inside its outer class
+                None if parent.is_some() => continue, // printed inside its outer class
                 _ => {}
             }
             found = true;
