@@ -16,5 +16,6 @@ pub mod res;
 pub mod sign;
 pub mod smali;
 pub mod table;
+pub mod values;
 
 pub use error::{Error, Result};

@@ -1,7 +1,7 @@
 //! Android resources as text: a [`Table`]'s values as `res/values*/*.xml`, and binary XML
 //! (AXML) documents. Format: frameworks/base/libs/androidfw/include/androidfw/ResourceTypes.h
 
-use crate::table::{Chunk, EntryValue, Table, Value, config};
+use crate::table::{Chunk, EntryValue, Package, Span, StringPool, Table, Value, config};
 use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
@@ -66,6 +66,46 @@ pub fn framework_id(ty: &str, name: &str) -> Option<u32> {
         .copied()
 }
 
+/// A package's resources by ID: type and name. An obfuscated table can give several resources
+/// of a type one name; each of those is named after its ID too (`name_0x7f030001`), so that
+/// every name says which resource it is.
+pub fn resource_names(p: &Package) -> BTreeMap<u32, (String, String)> {
+    let mut names = BTreeMap::new();
+    for c in &p.chunks {
+        let Chunk::Type(ty) = c else { continue };
+        for (i, e) in ty.entries.iter().enumerate() {
+            let Some(e) = e else { continue };
+            let id = p.id << 24 | (ty.id as u32) << 16 | i as u32;
+            names.entry(id).or_insert_with(|| {
+                let tn = p
+                    .type_name(ty.id)
+                    .map_or_else(|| format!("type{}", ty.id), str::to_owned);
+                let kn = p
+                    .keys
+                    .strings
+                    .get(e.key as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("res_{id:08x}"));
+                (tn, kn)
+            });
+        }
+    }
+    let mut count: HashMap<(&str, &str), usize> = HashMap::new();
+    for (t, n) in names.values() {
+        *count.entry((t, n)).or_default() += 1;
+    }
+    let shared: Vec<u32> = names
+        .iter()
+        .filter(|(_, (t, n))| count[&(t.as_str(), n.as_str())] > 1)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in shared {
+        let (_, n) = names.get_mut(&id).expect("listed above");
+        *n = format!("{n}_0x{id:08x}");
+    }
+    names
+}
+
 /// Resource id -> `type/name`.
 pub struct Names {
     map: HashMap<u32, (String, String)>,
@@ -78,24 +118,8 @@ impl Names {
     pub fn new(t: &Table) -> Names {
         let mut map = HashMap::new();
         for p in &t.packages {
-            for c in &p.chunks {
-                let Chunk::Type(ty) = c else { continue };
-                for (i, e) in ty.entries.iter().enumerate() {
-                    let Some(e) = e else { continue };
-                    let id = p.id << 24 | (ty.id as u32) << 16 | i as u32;
-                    map.entry(id).or_insert_with(|| {
-                        let tn = p
-                            .type_name(ty.id)
-                            .map_or_else(|| format!("type{}", ty.id), str::to_owned);
-                        let kn = p
-                            .keys
-                            .strings
-                            .get(e.key as usize)
-                            .cloned()
-                            .unwrap_or_else(|| format!("res_{id:08x}"));
-                        (tn, kn)
-                    });
-                }
+            for (id, name) in resource_names(p) {
+                map.entry(id).or_insert(name);
             }
         }
         Names {
@@ -138,23 +162,65 @@ impl Names {
     }
 }
 
-fn complex(data: u32, units: &[&str]) -> String {
-    const SHIFT: [u32; 4] = [0, 7, 15, 23];
-    let mantissa = (data as i32 >> 8) as f64;
-    let v = mantissa / (1u32 << SHIFT[((data >> 4) & 3) as usize]) as f64;
-    let unit = units.get((data & 0xf) as usize).copied().unwrap_or("");
-    format!("{}{unit}", trim_float(v))
+/// A dimension or fraction as stored: a 24-bit mantissa in one of four fixed-point radixes,
+/// and a unit. This is aapt2's encoding (`ResTable::stringToFloat`), so the same text gives the
+/// same bits: the radix is the most precise one the value fits.
+pub(crate) fn float_to_complex(f: f32, unit: u32) -> u32 {
+    let neg = f < 0.0;
+    let bits = (f.abs() * (1u32 << 23) as f32) as f64 + 0.5;
+    let bits = bits as u64;
+    let (radix, shift) = if bits & 0x7f_ffff == 0 {
+        (0, 23)
+    } else if bits & 0xffff_ffff_ff80_0000 == 0 {
+        (3, 0)
+    } else if bits & 0xffff_ffff_8000_0000 == 0 {
+        (2, 8)
+    } else if bits & 0xffff_ff80_0000_0000 == 0 {
+        (1, 16)
+    } else {
+        (0, 23)
+    };
+    let mut mantissa = ((bits >> shift) & 0xff_ffff) as u32;
+    if neg {
+        mantissa = mantissa.wrapping_neg() & 0xff_ffff;
+    }
+    mantissa << 8 | radix << 4 | unit
 }
 
-fn trim_float(v: f64) -> String {
-    let s = format!("{v:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-" {
-        "0".into()
-    } else {
-        s.to_string()
+/// The value of a dimension or fraction.
+fn complex_value(data: u32) -> f64 {
+    const SHIFT: [u32; 4] = [0, 7, 15, 23];
+    let mantissa = (data as i32 >> 8) as f64;
+    mantissa / (1u32 << SHIFT[((data >> 4) & 3) as usize]) as f64
+}
+
+/// A dimension or fraction as text: the shortest number that encodes back to `data`.
+/// `scale` is what the number is multiplied by when it is stored, 1/100 for a percentage.
+fn complex(data: u32, units: &[&str], scale: f32) -> String {
+    let unit = units.get((data & 0xf) as usize).copied().unwrap_or("");
+    let v = complex_value(data) / scale as f64;
+    let shortest = (0..=10).find_map(|digits| {
+        let s = trim_number(format!("{v:.digits$}"));
+        let f: f32 = s.parse().ok()?;
+        (float_to_complex(f * scale, data & 0xf) == data).then_some(s)
+    });
+    format!("{}{unit}", shortest.unwrap_or_else(|| v.to_string()))
+}
+
+fn trim_number(s: String) -> String {
+    if !s.contains('.') {
+        return s;
+    }
+    let t = s.trim_end_matches('0').trim_end_matches('.');
+    match t {
+        "" | "-" | "-0" => "0".into(),
+        t => t.into(),
     }
 }
+
+/// The units of a dimension and a fraction, by their code.
+pub(crate) const DIMENSION_UNITS: [&str; 6] = ["px", "dp", "sp", "pt", "in", "mm"];
+pub(crate) const FRACTION_UNITS: [&str; 2] = ["%", "%p"];
 
 /// Text form of a typed value as it would appear in resource XML.
 pub fn format_value(v: Value, strings: &[String], names: &Names) -> String {
@@ -170,17 +236,11 @@ pub fn format_value(v: Value, strings: &[String], names: &Names) -> String {
         0x01 | 0x07 => names.reference(data, '@'),
         0x02 | 0x08 => names.reference(data, '?'),
         0x03 => strings.get(data as usize).cloned().unwrap_or_default(),
-        0x04 => trim_float(f32::from_bits(data) as f64),
-        0x05 => complex(data, &["px", "dp", "sp", "pt", "in", "mm"]),
-        0x06 => {
-            let s = complex(data, &["%", "%p"]);
-            // fractions are stored as 0..1
-            let (num, unit) = s.split_at(s.find('%').unwrap_or(s.len()));
-            format!(
-                "{}{unit}",
-                trim_float(num.parse::<f64>().unwrap_or(0.0) * 100.0)
-            )
-        }
+        // the shortest text that reads back as the same float
+        0x04 => f32::from_bits(data).to_string(),
+        0x05 => complex(data, &DIMENSION_UNITS, 1.0),
+        // fractions are stored as 0..1
+        0x06 => complex(data, &FRACTION_UNITS, 0.01),
         0x10 => (data as i32).to_string(),
         0x11 => format!("0x{data:08x}"),
         0x12 => (if data != 0 { "true" } else { "false" }).into(),
@@ -199,13 +259,86 @@ pub fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Escape for a resource string body (apostrophes and leading @/? have meaning there).
-fn res_string(s: &str) -> String {
-    let mut e = xml_escape(s).replace('\'', "\\'").replace('\n', "\\n");
-    if e.starts_with('@') || e.starts_with('?') {
-        e.insert(0, '\\');
+/// A string value as the body of a resource element, as aapt2 reads it back: `\\`, `\"`,
+/// `\'`, `\n` and `\t` escaped, a leading `@` or `?` escaped, the whole in quotes when its
+/// whitespace would otherwise be collapsed, and each of its style spans as a tag around the
+/// characters it covers (`<b>`, `<font size="12">`, ...).
+fn string_xml(pool: &StringPool, i: u32) -> String {
+    let text = pool.strings.get(i as usize).map_or("", String::as_str);
+    let spans = pool.styles.get(i as usize).map_or(&[][..], Vec::as_slice);
+    string_body(text, spans, &pool.strings)
+}
+
+fn string_body(text: &str, spans: &[Span], strings: &[String]) -> String {
+    // whitespace that aapt2 would collapse: `\n` and `\t` are written escaped, and keep
+    let collapses = |c: char| c.is_whitespace() && c != '\n' && c != '\t';
+    let quote = text.starts_with(collapses)
+        || text.ends_with(collapses)
+        || text.contains("  ")
+        || text.contains(|c: char| collapses(c) && c != ' ');
+    let tag = |s: &Span, open: bool| -> String {
+        let name = strings.get(s.name as usize).map_or("span", String::as_str);
+        let mut parts = name.split(';');
+        let tag = parts.next().unwrap_or("span");
+        if !open {
+            return format!("</{tag}>");
+        }
+        let attrs: String = parts
+            .filter_map(|a| a.split_once('='))
+            .map(|(k, v)| format!(" {k}=\"{}\"", xml_escape(v)))
+            .collect();
+        format!("<{tag}{attrs}>")
+    };
+    // spans by where they open, the longest first; they close innermost first
+    let mut spans: Vec<&Span> = spans.iter().collect();
+    spans.sort_by_key(|s| (s.first, std::cmp::Reverse(s.last)));
+    let mut next = spans.into_iter().peekable();
+    let mut open: Vec<&Span> = Vec::new();
+    let mut out = String::with_capacity(text.len() + 2);
+    if quote {
+        out.push('"');
     }
-    e
+    let mut unit = 0u32; // position in UTF-16 units, as spans count
+    let mut chars = text.chars();
+    loop {
+        while let Some(s) = open.last().filter(|s| s.last.wrapping_add(1) <= unit) {
+            out.push_str(&tag(s, false));
+            open.pop();
+        }
+        while let Some(s) = next.next_if(|s| s.first <= unit) {
+            if s.last.wrapping_add(1) == s.first {
+                // a span over no characters: `<br/>`
+                out.push_str(&tag(s, true).replacen('>', "/>", 1));
+            } else {
+                out.push_str(&tag(s, true));
+                open.push(s);
+            }
+        }
+        let Some(c) = chars.next() else { break };
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '@' | '?' if unit == 0 => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+        unit += c.len_utf16() as u32;
+    }
+    for s in open.iter().rev() {
+        out.push_str(&tag(s, false));
+    }
+    if quote {
+        out.push('"');
+    }
+    out
 }
 
 /// Decode a binary XML document to text. `names` resolves @references when available.
@@ -442,6 +575,7 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
         };
     };
     let strings = &t.strings.strings;
+    let resources = resource_names(p);
     // by type and qualifiers, then by entry: one directory per configuration
     let mut configs: BTreeMap<(u8, String), Entries> = BTreeMap::new();
     for c in &p.chunks {
@@ -461,14 +595,15 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
         let tname = p
             .type_name(*ty)
             .map_or_else(|| format!("type{ty}"), str::to_owned);
-        for (key, entry) in entries.values() {
-            let name = xml_escape(
-                p.keys
-                    .strings
-                    .get(*key as usize)
-                    .map_or("unnamed", |s| s.as_str()),
-            );
+        for (index, (_, entry)) in entries {
+            let id = p.id << 24 | (*ty as u32) << 16 | *index as u32;
+            let name = xml_escape(resources.get(&id).map_or("unnamed", |(_, n)| n.as_str()));
             let fmt = |v: Value| format_value(v, strings, names);
+            // a string with its spans; anything else, a reference say, as itself
+            let text = |v: Value| match v.ty {
+                Value::STRING => string_xml(&t.strings, v.data),
+                _ => xml_escape(&fmt(v)),
+            };
             match entry {
                 // a string value pointing into res/ is a file resource
                 EntryValue::Simple(Value {
@@ -489,18 +624,14 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                 }
                 EntryValue::Simple(v) => {
                     let line = match tname.as_str() {
-                        "string" => format!(
-                            "    <string name=\"{name}\">{}</string>",
-                            res_string(&fmt(*v))
-                        ),
+                        "string" => format!("    <string name=\"{name}\">{}</string>", text(*v)),
                         "id" => format!("    <item type=\"id\" name=\"{name}\" />"),
-                        "color" | "dimen" | "bool" | "integer" | "fraction" => format!(
-                            "    <{tname} name=\"{name}\">{}</{tname}>",
-                            xml_escape(&fmt(*v))
-                        ),
+                        "color" | "dimen" | "bool" | "integer" | "fraction" => {
+                            format!("    <{tname} name=\"{name}\">{}</{tname}>", text(*v))
+                        }
                         _ => format!(
                             "    <item type=\"{tname}\" name=\"{name}\">{}</item>",
-                            xml_escape(&fmt(*v))
+                            text(*v)
                         ),
                     };
                     values
@@ -519,6 +650,9 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                                         names.reference(*parent, '@').trim_start_matches("@style/")
                                     )
                                 )
+                            } else if name.contains('.') {
+                                // without it, a dotted name implies a parent: `A.B` is under `A`
+                                " parent=\"\"".into()
                             } else {
                                 String::new()
                             };
@@ -532,7 +666,7 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                                     s,
                                     "        <item name=\"{}\">{}</item>",
                                     xml_escape(an),
-                                    xml_escape(&fmt(*v))
+                                    text(*v)
                                 );
                             }
                             s += "    </style>";
@@ -545,7 +679,7 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                                 let _ = writeln!(
                                     s,
                                     "        <item quantity=\"{qn}\">{}</item>",
-                                    res_string(&fmt(*v))
+                                    text(*v)
                                 );
                             }
                             s += "    </plurals>";
@@ -560,15 +694,7 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                             };
                             let _ = writeln!(s, "    <{tag} name=\"{name}\">");
                             for (_, v) in items {
-                                let _ = writeln!(
-                                    s,
-                                    "        <item>{}</item>",
-                                    if v.ty == Value::STRING {
-                                        res_string(&fmt(*v))
-                                    } else {
-                                        xml_escape(&fmt(*v))
-                                    }
-                                );
+                                let _ = writeln!(s, "        <item>{}</item>", text(*v));
                             }
                             let _ = write!(s, "    </{tag}>");
                         }
@@ -577,8 +703,12 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                                 .iter()
                                 .find(|(k, _)| *k == 0x01000000)
                                 .map_or(0xffff, |(_, v)| v.data);
-                            let kids: Vec<_> =
-                                items.iter().filter(|(k, _)| k >> 24 != 0x01).collect();
+                            let kids: Vec<_> = items
+                                // the format, min, max and quantity keys, not the framework's
+                                // own enum names
+                                .iter()
+                                .filter(|(k, _)| k & 0xffff_0000 != 0x0100_0000)
+                                .collect();
                             let kind = if format & 0x20000 != 0 {
                                 "flag"
                             } else {
@@ -611,7 +741,7 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                                     s,
                                     "        <item name=\"{}\">{}</item>",
                                     xml_escape(&names.reference(*k, '@')),
-                                    xml_escape(&fmt(*v))
+                                    text(*v)
                                 );
                             }
                             s += "    </item>";
@@ -624,6 +754,27 @@ pub fn decode_table(t: &Table, names: &Names) -> Decoded {
                 }
             }
         }
+    }
+    // every resource's ID, so that a rebuild keeps them where compiled code expects them
+    let mut public: BTreeMap<u32, String> = BTreeMap::new();
+    for ((ty, _), entries) in &configs {
+        let tname = p
+            .type_name(*ty)
+            .map_or_else(|| format!("type{ty}"), str::to_owned);
+        for index in entries.keys() {
+            let id = p.id << 24 | (*ty as u32) << 16 | *index as u32;
+            public.entry(id).or_insert_with(|| {
+                let name = resources.get(&id).map_or("unnamed", |(_, n)| n.as_str());
+                format!(
+                    "    <public type=\"{}\" name=\"{}\" id=\"0x{id:08x}\" />",
+                    xml_escape(&tname),
+                    xml_escape(name)
+                )
+            });
+        }
+    }
+    if !public.is_empty() {
+        values.insert("values/public.xml".into(), public.into_values().collect());
     }
     let values = values
         .into_iter()
@@ -724,8 +875,11 @@ mod tests {
             ),
             "1.5sp"
         );
-        assert_eq!(res_string("it's @home"), "it\\'s @home");
-        assert_eq!(res_string("@x"), "\\@x");
+        let body = |s: &str| string_body(s, &[], &[]);
+        assert_eq!(body("it's @home"), "it\\'s @home");
+        assert_eq!(body("@x"), "\\@x");
+        assert_eq!(body("say \"hi\"\n"), "say \\\"hi\\\"\\n");
+        assert_eq!(body(" two  spaces"), "\" two  spaces\"");
     }
 
     #[test]
@@ -775,5 +929,72 @@ mod tests {
         d.extend_from_slice(&0u32.to_le_bytes());
         d.extend_from_slice(&[2, 2, b'h', b'i', 0, 0, 0, 0]);
         assert_eq!(crate::table::read::pool(&d, 0).unwrap().strings, ["hi"]);
+    }
+}
+
+#[cfg(test)]
+mod corpus {
+    use super::*;
+    use crate::table::{self, Chunk, EntryValue, Value};
+
+    /// Every dimension, fraction and float of every table in a directory prints as text that
+    /// encodes back to the same bits:
+    /// APKSCOPE_TABLES=<dir> cargo test --release numbers_round_trip -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn numbers_round_trip() {
+        let dir = std::env::var("APKSCOPE_TABLES").expect("set APKSCOPE_TABLES");
+        let names = Names {
+            map: HashMap::new(),
+            app: 0x7f,
+        };
+        let (mut checked, mut wrong) = (0, 0);
+        for e in std::fs::read_dir(dir).unwrap() {
+            let Ok(t) = table::read(&std::fs::read(e.unwrap().path()).unwrap()) else {
+                continue;
+            };
+            let mut values = vec![];
+            for p in &t.packages {
+                for c in &p.chunks {
+                    let Chunk::Type(ty) = c else { continue };
+                    for e in ty.entries.iter().flatten() {
+                        match &e.value {
+                            EntryValue::Simple(v) => values.push(*v),
+                            EntryValue::Complex { map, .. } => {
+                                values.extend(map.iter().map(|x| x.1))
+                            }
+                        }
+                    }
+                }
+            }
+            for v in values {
+                let text = format_value(v, &[], &names);
+                let back = match v.ty {
+                    Value::FLOAT => text.parse::<f32>().map(f32::to_bits).ok(),
+                    Value::DIMENSION | Value::FRACTION => {
+                        let (units, scale): (&[&str], f32) = if v.ty == Value::DIMENSION {
+                            (&DIMENSION_UNITS, 1.0)
+                        } else {
+                            (&FRACTION_UNITS, 0.01)
+                        };
+                        let unit = (v.data & 0xf) as usize;
+                        let num = text.trim_end_matches(units.get(unit).copied().unwrap_or(""));
+                        num.parse::<f32>()
+                            .ok()
+                            .map(|f| float_to_complex(f * scale, unit as u32))
+                    }
+                    _ => continue,
+                };
+                checked += 1;
+                if back != Some(v.data) {
+                    wrong += 1;
+                    if wrong <= 10 {
+                        println!("{:#x} {:#010x} -> {text} -> {back:x?}", v.ty, v.data);
+                    }
+                }
+            }
+        }
+        println!("{checked} numbers, {wrong} don't encode back");
+        assert_eq!(wrong, 0);
     }
 }

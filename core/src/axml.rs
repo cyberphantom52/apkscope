@@ -237,18 +237,6 @@ pub fn original_attrs(d: &[u8]) -> HashMap<String, (u8, Option<u32>)> {
 // ---------- typed values ----------
 
 /// Complex (dimension) value: mantissa with the largest radix that still fits 23 bits.
-fn complex(v: f64, unit: u32) -> u32 {
-    const SHIFT: [i32; 4] = [0, 7, 15, 23];
-    let mut best = (0u32, (v.round() as i64 as i32) as u32);
-    for (r, s) in SHIFT.iter().enumerate() {
-        let m = (v * f64::from(1u32 << s)).round();
-        if m.abs() < f64::from(1u32 << 23) {
-            best = (r as u32, (m as i64 as i32) as u32);
-        }
-    }
-    (best.1 << 8) | (best.0 << 4) | unit
-}
-
 /// Resolve `@type/name`, `@android:type/name`, `@0x7f..`, `?attr/x` to (type, id).
 fn reference(s: &str, names: &Names) -> Result<(u8, u32)> {
     let (ty, body) = if let Some(b) = s.strip_prefix('?') {
@@ -328,7 +316,7 @@ fn typed(text: &str, orig: Option<u8>, names: &Names) -> Result<(Option<String>,
         if let Some(num) = text.strip_suffix(unit)
             && let Ok(v) = num.parse::<f64>()
         {
-            return Ok((None, 0x05, complex(v, code)));
+            return Ok((None, 0x05, crate::res::float_to_complex(v as f32, code)));
         }
     }
     if orig.is_some_and(|t| t != 0x03) {
@@ -638,7 +626,7 @@ mod tests {
         );
         assert!(typed("@string/missing", None, &names).is_err());
         // 16dp: mantissa 16 at radix 23p0... decodes back to 16
-        let c = complex(16.0, 1);
+        let c = crate::res::float_to_complex(16.0, 1);
         assert_eq!(c & 0xf, 1);
         let mant =
             (c as i32 >> 8) as f64 / f64::from(1u32 << [0, 7, 15, 23][((c >> 4) & 3) as usize]);

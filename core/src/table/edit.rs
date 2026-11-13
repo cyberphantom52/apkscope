@@ -150,6 +150,43 @@ impl Package {
         Ok(self.resource(type_id, index))
     }
 
+    /// Add resource `name` of type `ty` at `id`, which no other resource has: for IDs that
+    /// were given, as `public.xml` gives them.
+    pub fn add_as(
+        &mut self,
+        id: u32,
+        ty: &str,
+        name: &str,
+        config: &[u8],
+        value: EntryValue,
+    ) -> Result<()> {
+        let (package, type_id, index) = split(id);
+        let bad = |why: &str| Error::resources(format!("{ty}/{name} can't be {id:#010x}: {why}"));
+        if package != self.id {
+            return Err(bad("another package"));
+        }
+        match self.type_id(ty) {
+            Some(t) if t == type_id && self.spec(t).is_some() => {}
+            Some(t) if t == type_id => {
+                self.add_type(ty)?;
+            }
+            None if self.types.strings.len() as u32 + 1 + self.type_id_offset == type_id as u32 => {
+                self.add_type(ty)?;
+            }
+            _ => return Err(bad("another type")),
+        }
+        if self.values(id).next().is_some() {
+            return Err(bad("taken"));
+        }
+        let key = self.keys.intern(name);
+        let spec = self.spec_mut(type_id);
+        if spec.flags.len() <= index {
+            spec.flags.resize(index + 1, 0);
+        }
+        self.put(type_id, index, config, key, 0, value);
+        Ok(())
+    }
+
     /// Remove a resource's value in `config`; its ID stays taken.
     pub fn remove(&mut self, id: u32, config: &[u8]) -> bool {
         let (_, ty, index) = split(id);
