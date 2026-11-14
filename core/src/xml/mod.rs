@@ -4,6 +4,7 @@
 //! Format: `ResXMLTree` in `frameworks/base/libs/androidfw/include/androidfw/ResourceTypes.h`.
 
 pub mod read;
+pub mod text;
 pub mod write;
 
 pub use read::read;

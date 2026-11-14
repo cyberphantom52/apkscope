@@ -1,31 +1,15 @@
 //! Android resources as text: a [`Table`]'s values as `res/values*/*.xml`, and binary XML
 //! (AXML) documents. Format: frameworks/base/libs/androidfw/include/androidfw/ResourceTypes.h
 
+use crate::Result;
 use crate::table::{Chunk, EntryValue, Package, Span, StringPool, Table, Value, config};
-use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 type R<T> = Result<T>;
 
-fn u8_at(d: &[u8], o: usize) -> R<u8> {
-    d.get(o)
-        .copied()
-        .ok_or_else(|| Error::resources(format!("read past end at {o:#x}")))
-}
-fn u16_at(d: &[u8], o: usize) -> R<u16> {
-    d.get(o..o + 2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .ok_or_else(|| Error::resources(format!("read past end at {o:#x}")))
-}
-fn u32_at(d: &[u8], o: usize) -> R<u32> {
-    d.get(o..o + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .ok_or_else(|| Error::resources(format!("read past end at {o:#x}")))
-}
-
 /// Android's public framework resources (`0x01010054` -> attr `windowBackground`), from AOSP.
-fn framework(id: u32) -> Option<(&'static str, &'static str)> {
+pub(crate) fn framework(id: u32) -> Option<(&'static str, &'static str)> {
     static TABLE: std::sync::OnceLock<HashMap<u32, (&'static str, &'static str)>> =
         std::sync::OnceLock::new();
     TABLE
@@ -343,138 +327,18 @@ fn string_body(text: &str, spans: &[Span], strings: &[String]) -> String {
 
 /// Decode a binary XML document to text. `names` resolves @references when available.
 pub fn decode_xml(d: &[u8], names: Option<&Names>) -> R<String> {
-    if u16_at(d, 0)? != 0x0003 {
-        return Err(Error::resources("not binary XML"));
-    }
     let empty = Names {
         map: HashMap::new(),
         app: 0x7f,
     };
-    let names = names.unwrap_or(&empty);
-    let mut strings: Vec<String> = Vec::new();
-    let mut res_ids: Vec<u32> = Vec::new();
-    let mut ns: HashMap<String, String> = HashMap::new(); // uri -> prefix
-    let mut pending_ns: Vec<(String, String)> = Vec::new();
-    let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
-    let mut depth = 0usize;
-    let mut open_tag = false; // last start tag not yet closed with '>'
-    let s = |strings: &Vec<String>, i: u32| strings.get(i as usize).cloned().unwrap_or_default();
-    let mut at = u16_at(d, 2)? as usize;
-    while at + 8 <= d.len() {
-        let (ty, hsize, size) = (
-            u16_at(d, at)?,
-            u16_at(d, at + 2)? as usize,
-            u32_at(d, at + 4)? as usize,
-        );
-        if size < 8 {
-            break;
-        }
-        let body = at + hsize;
-        match ty {
-            0x0001 => strings = crate::table::read::pool(d, at)?.strings,
-            0x0180 => {
-                res_ids = (0..(size - hsize) / 4)
-                    .map(|k| u32_at(d, body + k * 4))
-                    .collect::<R<_>>()?
-            }
-            0x0100 => {
-                let (prefix, uri) = (
-                    s(&strings, u32_at(d, body)?),
-                    s(&strings, u32_at(d, body + 4)?),
-                );
-                ns.insert(uri.clone(), prefix.clone());
-                pending_ns.push((prefix, uri));
-            }
-            0x0102 => {
-                if open_tag {
-                    out += ">\n";
-                }
-                let name = s(&strings, u32_at(d, body + 4)?);
-                let (astart, asize, acount) = (
-                    u16_at(d, body + 8)? as usize,
-                    u16_at(d, body + 10)? as usize,
-                    u16_at(d, body + 12)? as usize,
-                );
-                let pad = "    ".repeat(depth);
-                let _ = write!(out, "{pad}<{name}");
-                let attr_pad = format!("\n{pad}    ");
-                for (prefix, uri) in pending_ns.drain(..) {
-                    let _ = write!(out, "{attr_pad}xmlns:{prefix}=\"{}\"", xml_escape(&uri));
-                }
-                for k in 0..acount {
-                    let a = body + astart + k * asize;
-                    let (ans, aname, raw) = (u32_at(d, a)?, u32_at(d, a + 4)?, u32_at(d, a + 8)?);
-                    let value = Value {
-                        ty: u8_at(d, a + 15)?,
-                        data: u32_at(d, a + 16)?,
-                    };
-                    let mut an = s(&strings, aname);
-                    if an.is_empty() {
-                        // obfuscated attribute names: fall back to the resource id
-                        an = res_ids
-                            .get(aname as usize)
-                            .map_or(format!("attr{aname}"), |id| {
-                                names
-                                    .name(*id)
-                                    .map_or(format!("attr_{id:08x}"), str::to_string)
-                            });
-                    }
-                    let mut prefix = if ans == u32::MAX {
-                        None
-                    } else {
-                        ns.get(&s(&strings, ans)).cloned()
-                    };
-                    // Android reads framework attributes by id alone; packers blank or fake their
-                    // name and namespace strings, so the id decides both
-                    if let Some(("attr", fw)) =
-                        res_ids.get(aname as usize).and_then(|&id| framework(id))
-                    {
-                        an = fw.to_string();
-                        prefix = Some(
-                            ns.get("http://schemas.android.com/apk/res/android")
-                                .cloned()
-                                .unwrap_or_else(|| "android".into()),
-                        );
-                    }
-                    let full = prefix.map_or(an.clone(), |p| format!("{p}:{an}"));
-                    let text = if raw != u32::MAX {
-                        s(&strings, raw)
-                    } else {
-                        framework_constant(&an, value)
-                            .unwrap_or_else(|| format_value(value, &strings, names))
-                    };
-                    let _ = write!(out, "{attr_pad}{full}=\"{}\"", xml_escape(&text));
-                }
-                open_tag = true;
-                depth += 1;
-            }
-            0x0103 => {
-                depth = depth.saturating_sub(1);
-                if open_tag {
-                    out += " />\n";
-                    open_tag = false;
-                } else {
-                    let name = s(&strings, u32_at(d, body + 4)?);
-                    let _ = writeln!(out, "{}</{name}>", "    ".repeat(depth));
-                }
-            }
-            0x0104 => {
-                if open_tag {
-                    out += ">\n";
-                    open_tag = false;
-                }
-                let text = s(&strings, u32_at(d, body)?);
-                let _ = writeln!(out, "{}{}", "    ".repeat(depth), xml_escape(text.trim()));
-            }
-            _ => {}
-        }
-        at += size;
-    }
-    Ok(out)
+    Ok(crate::xml::text::decode(
+        &crate::xml::read(d)?,
+        names.unwrap_or(&empty),
+    ))
 }
 
 /// Named constants of common framework attributes (`-2` -> `wrap_content`, `0x11` -> `center`).
-fn framework_constant(attr: &str, Value { ty, data }: Value) -> Option<String> {
+pub(crate) fn framework_constant(attr: &str, Value { ty, data }: Value) -> Option<String> {
     if !(0x10..=0x11).contains(&ty) {
         return None;
     }
