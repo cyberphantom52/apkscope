@@ -80,6 +80,22 @@ impl Package {
         })
     }
 
+    /// The configuration a resource directory's qualifiers (`xxhdpi`, `en-rIN`) name here: one
+    /// the package has exactly, or else a new one as aapt2 would compile it for an app whose
+    /// `minSdkVersion` is `min_sdk` ([`config::versioned`]).
+    pub fn config(&self, qualifiers: &str, min_sdk: u16) -> Result<Vec<u8>> {
+        let c = config::parse(qualifiers)?;
+        let has = self
+            .chunks
+            .iter()
+            .any(|ch| matches!(ch, Chunk::Type(t) if t.config == c));
+        Ok(if has {
+            c
+        } else {
+            config::versioned(&c, min_sdk)
+        })
+    }
+
     /// The ID of resource `name` of type `ty`.
     pub fn find(&self, ty: &str, name: &str) -> Option<u32> {
         let (ty, key) = (self.type_id(ty)?, self.keys.index(name)?);

@@ -5,7 +5,7 @@
 
 use crate::markup::{Element, Node, parse_xml};
 use crate::res::{self, Names};
-use crate::table::{EntryValue, Package, Span, StringPool, Table, Value, config};
+use crate::table::{EntryValue, Package, Span, StringPool, Table, Value};
 use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -653,12 +653,18 @@ fn file_types(file: &str) -> Vec<String> {
 /// Apply `res/values*/*.xml` files, by their path under `res/` (`values-night/colors.xml`), to
 /// the app package. Each file says everything its configuration has of the types in it: a
 /// value it has is set or added, one it no longer has is removed. `values/public.xml` gives
-/// new resources their IDs.
-pub fn apply(t: &mut Table, files: &BTreeMap<String, String>) -> Result<()> {
-    apply_with(t, files, true)
+/// new resources their IDs. `min_sdk`, the app's `minSdkVersion`, decides as it does for aapt2
+/// whether a new configuration names an SDK version (`values-night` as `night-v8`).
+pub fn apply(t: &mut Table, files: &BTreeMap<String, String>, min_sdk: u16) -> Result<()> {
+    apply_with(t, files, min_sdk, true)
 }
 
-fn apply_with(t: &mut Table, files: &BTreeMap<String, String>, keep: bool) -> Result<()> {
+fn apply_with(
+    t: &mut Table,
+    files: &BTreeMap<String, String>,
+    min_sdk: u16,
+    keep: bool,
+) -> Result<()> {
     let names = Names::new(t);
     let Some(app) = t.app().map(|p| p.id) else {
         return match files.is_empty() {
@@ -687,7 +693,11 @@ fn apply_with(t: &mut Table, files: &BTreeMap<String, String>, keep: bool) -> Re
         if file == "public.xml" {
             continue;
         }
-        let at = config::parse(qualifiers.trim_start_matches('-')).map_err(|e| e.at(path))?;
+        let at = t
+            .package(app)
+            .expect("the app package")
+            .config(qualifiers.trim_start_matches('-'), min_sdk)
+            .map_err(|e| e.at(path))?;
         let root = parse_xml(text).map_err(|e| e.at(path))?;
         let defined = resources(&root).map_err(|e| e.at(path))?;
         // the types this file has a say over
@@ -778,7 +788,7 @@ fn apply_with(t: &mut Table, files: &BTreeMap<String, String>, keep: bool) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::{self, Chunk};
+    use crate::table::{self, Chunk, config};
 
     /// The first entries in which two tables of the same shape differ.
     fn differences(a: &Table, b: &Table) -> Vec<String> {
@@ -841,7 +851,7 @@ mod tests {
             let names = Names::new(&t);
             let decoded = res::decode_table(&t, &names);
             let mut back = t.clone();
-            match apply(&mut back, &decoded.values) {
+            match apply(&mut back, &decoded.values, 0) {
                 Err(e) => {
                     failed += 1;
                     println!("{}: {}", path.display(), e.report());
@@ -865,7 +875,7 @@ mod tests {
 #[cfg(test)]
 mod edits {
     use super::*;
-    use crate::table::{Chunk, Entry, Spec, Type};
+    use crate::table::{Chunk, Entry, Spec, Type, config};
 
     fn pool(strings: &[&str]) -> StringPool {
         StringPool {
@@ -936,6 +946,7 @@ mod edits {
                 ("values/integers.xml", r#"<resources><integer name="answer">42</integer></resources>"#),
                 ("values/public.xml", r#"<resources><public type="string" name="pinned" id="0x7f010005" /></resources>"#),
             ]),
+            0,
         )
         .unwrap();
         let p = t.app().unwrap();
@@ -949,8 +960,13 @@ mod edits {
         assert_eq!(t.strings.strings[spans[0].name as usize], "b");
         assert_eq!(p.find("string", "pinned"), Some(0x7f01_0005));
         assert_eq!(p.find("string", "quoted"), Some(0x7f01_0001));
-        let night = config::parse("night").unwrap();
+        // a new configuration gets the SDK version aapt2 gives it below the app's minimum
+        let night = config::parse("night-v8").unwrap();
         assert!(p.get(p.find("bool", "dark").unwrap(), &night).is_some());
+        assert_eq!(
+            p.config("night", 21).unwrap(),
+            config::parse("night").unwrap()
+        );
 
         // what it decodes to says the same
         let decoded = res::decode_table(&t, &Names::new(&t)).values;
@@ -978,7 +994,7 @@ mod edits {
             r#"    <string name="quoted">"  two  spaces " and \"quotes\"</string>"#,
             "",
         );
-        apply(&mut t, &files(&[("values/strings.xml", &fewer)])).unwrap();
+        apply(&mut t, &files(&[("values/strings.xml", &fewer)]), 0).unwrap();
         let p = t.app().unwrap();
         assert_eq!(p.find("string", "quoted"), None);
         assert!(p.find("string", "hello").is_some());

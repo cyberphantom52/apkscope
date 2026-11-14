@@ -304,7 +304,11 @@ apkscope build     app.apk out.apk --res app/                   # put back what 
 XML as text, everything else as it is. `build --res` puts back only the files that changed, so
 whatever you don't touch stays exactly as it was: a string or a layout attribute you change, a value
 you add (with the ID `public.xml` gives it, or the next free one), a value or a whole `values-xx/`
-directory you delete. Adding new resource files, and renaming resources, aren't supported yet.
+directory you delete. New files under `res/` add their resources, with XML compiled as aapt2 would
+(a layout can use a string added with it), and files you delete are removed. A new directory gets
+the configuration aapt2 would give it for the app's `minSdkVersion`. Images aren't processed, so a
+new `.9.png` must already be compiled, as one taken from another APK is. Renaming resources isn't
+supported yet.
 
 `--json`, `--limit N`, `--offset N` work everywhere. Takes `.apk`, `.jar` (Android framework JARs), `.apks`, `.xapk`, `.dex`.
 `apkscope --help` lists everything.

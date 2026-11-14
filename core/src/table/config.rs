@@ -260,6 +260,41 @@ pub fn name(c: &[u8]) -> String {
     q.join("-")
 }
 
+/// `c` with the SDK version aapt2 gives a resource directory with its qualifiers in an app
+/// whose `minSdkVersion` is `min_sdk`: the first version that has them, if that is later than
+/// the one `c` names, and none if it is `min_sdk` or earlier. Below SDK 4, `drawable-xxhdpi`
+/// is `xxhdpi-v4` and `values-night` is `night-v8`; for most apps both have no version.
+pub fn versioned(c: &[u8], min_sdk: u16) -> Vec<u8> {
+    let mut c = c.to_vec();
+    let density = u16_(&c, 14);
+    let ui_type = c[29] & 0x0f;
+    let sdk = if c[19] != 0 {
+        34 // grammatical gender
+    } else if ui_type == 0x07 || c[49] & 0x0f != 0 {
+        26 // VR headset, wide colour gamut, HDR
+    } else if c[48] & 0x03 != 0 {
+        23 // round
+    } else if density == 0xfffe {
+        21 // anydpi
+    } else if u16_(&c, 30) != 0 || u16_(&c, 32) != 0 || u16_(&c, 34) != 0 {
+        13 // smallest width, width, height
+    } else if ui_type != 0 || c[29] & 0x30 != 0 {
+        8 // UI mode, night
+    } else if c[28] & 0x3f != 0 || density != 0 {
+        4 // screen size, long, density
+    } else {
+        0
+    };
+    if sdk > u16_(&c, 24) {
+        c[24..26].copy_from_slice(&sdk.to_le_bytes());
+        c[26..28].copy_from_slice(&[0, 0]);
+    }
+    if u16_(&c, 24) <= min_sdk {
+        c[24..28].copy_from_slice(&[0; 4]);
+    }
+    c
+}
+
 /// The configuration that qualifiers name, as [`name`] writes them.
 pub fn parse(qualifiers: &str) -> Result<Vec<u8>> {
     let mut c = default();
