@@ -293,7 +293,18 @@ apkscope build     app.apk out.apk --string "app_name=My App"   # edit, rebuild,
 # patch the code
 apkscope smali     app.apk com.example.Api > Api.smali          # one class as editable Smali
 apkscope build     app.apk out.apk --smali Api.smali            # assemble it back in, rebuild, sign
+
+# edit the resources
+apkscope res       app.apk app/                                 # manifest and res/ as editable files
+apkscope build     app.apk out.apk --res app/                   # put back what changed, rebuild, sign
 ```
+
+`apkscope res` writes `AndroidManifest.xml` and `res/` as apktool lays them out: values as
+`res/values*/*.xml` with a `public.xml` that keeps every resource's ID, layouts, drawables and other
+XML as text, everything else as it is. `build --res` puts back only the files that changed, so
+whatever you don't touch stays exactly as it was: a string or a layout attribute you change, a value
+you add (with the ID `public.xml` gives it, or the next free one), a value or a whole `values-xx/`
+directory you delete. Adding new resource files, and renaming resources, aren't supported yet.
 
 `--json`, `--limit N`, `--offset N` work everywhere. Takes `.apk`, `.jar` (Android framework JARs), `.apks`, `.xapk`, `.dex`.
 `apkscope --help` lists everything.
@@ -406,6 +417,23 @@ let mut edits = rebuild::Edits::new();
 smali::inject_into(&mut apk, &[class.replace("const/4 v0, 0x0", "const/4 v0, 0x1")], &mut edits)?;
 let (unsigned, _) = rebuild::rebuild_from(Cursor::new(&bytes), &edits)?;
 ```
+
+Resources are files you edit as text, the same as `apkscope res` writes them:
+
+```rust
+use apkscope_core::{apk::Apk, rebuild, resources};
+
+let mut apk = Apk::new(std::fs::File::open("app.apk")?)?;
+let mut files = resources::decode(&mut apk)?;     // "res/values/strings.xml" -> bytes, ...
+let strings = String::from_utf8(files["res/values/strings.xml"].clone())?;
+files.insert("res/values/strings.xml".into(), strings.replace(">Old<", ">New<").into_bytes());
+let edits = resources::edits(&mut apk, &files, false)?;  // only resources.arsc changes
+let (unsigned, _) = rebuild::rebuild("app.apk", &edits)?;
+```
+
+Underneath are `table` (`resources.arsc` as a model you can change: `find`, `set`, `add`, `remove`),
+`values` (values XML into a table), and `xml` (binary XML as a model, and edited text back into it).
+Each writes back what it read byte for byte.
 
 Nothing is signed unless you call `sign`. Fallible functions return `apkscope_core::Error`, a `thiserror` enum: `Io`, `Zip`, `Key` and `Rsa` keep the underlying error as their `source()`; `In` says which file or entry an error is in; `ClassNotFound` and `EntryNotFound` name what's missing; `Smali` has the line; and `Dex`, `Assemble`, `Resources`, `Xml` and `Signature` describe what is wrong with that kind of input. `Error::report()` joins a message with its causes, which is what the command prints.
 

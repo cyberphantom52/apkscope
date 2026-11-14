@@ -198,6 +198,20 @@ impl Package {
         });
         if removed {
             self.refresh_spec(ty, index);
+            // a configuration with no values left has no type chunk: Android's loader, and
+            // aapt2, don't take an empty one
+            let before = self.chunks.len();
+            self.chunks.retain(|c| {
+                !matches!(c, Chunk::Type(t) if t.id == ty && t.config == config
+                    && t.entries.iter().all(Option::is_none))
+            });
+            if self.chunks.len() != before {
+                let types = self.types_of(ty).count() as u16;
+                let spec = self.spec_mut(ty);
+                if spec.res1 != 0 {
+                    spec.res1 = types;
+                }
+            }
         }
         removed
     }
@@ -297,19 +311,17 @@ impl Package {
     }
 
     /// An entry's spec flags: the configuration bits in which its values differ, as aapt2
-    /// computes them, and its public and staged flags as they were.
+    /// computes them (from every pair of them), and its public and staged flags as they were.
     fn refresh_spec(&mut self, ty: u8, index: usize) {
         let configs: Vec<Vec<u8>> = self
             .types_of(ty)
             .filter(|t| t.entries.get(index).is_some_and(Option::is_some))
             .map(|t| t.config.clone())
             .collect();
-        let mut bits = 0;
-        for (i, a) in configs.iter().enumerate() {
-            for b in &configs[i + 1..] {
-                bits |= config::diff(a, b);
-            }
-        }
+        // a field differs between two of them exactly when one differs from the first
+        let bits = configs.split_first().map_or(0, |(first, rest)| {
+            rest.iter().fold(0, |b, c| b | config::diff(first, c))
+        });
         let flag = &mut self.spec_mut(ty).flags[index];
         *flag = *flag & SPEC_NOT_CONFIG | bits;
     }
@@ -401,6 +413,9 @@ mod tests {
         assert!(p.remove(hello, &night));
         assert!(!p.remove(hello, &night));
         assert_eq!(p.spec(1).unwrap().flags[0], 0);
+        // the string type has no night values left, so no night chunk
+        assert_eq!(p.types_of(1).count(), 1);
+        assert_eq!(p.spec(1).unwrap().res1, 1);
 
         // what was written reads back the same, and decodes to the values put in
         let bytes = write(&t);

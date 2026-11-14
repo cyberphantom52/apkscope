@@ -86,7 +86,11 @@ pub(crate) fn parse_xml(text: &str) -> Result<Element> {
         line: 0,
     }];
     let mut i = 0;
-    let line_at = |i: usize| text[..i].matches('\n').count() + 1;
+    // the line each byte is on, counted once: a values file can have tens of thousands of nodes
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let line_at = |i: usize| starts.partition_point(|&s| s <= i);
     let unterminated =
         |what: &str, i: usize| Error::xml(format!("line {}: unterminated {what}", line_at(i)));
     while i < text.len() {

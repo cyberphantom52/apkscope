@@ -14,6 +14,7 @@ mod error;
 mod markup;
 pub mod rebuild;
 pub mod res;
+pub mod resources;
 pub mod sign;
 pub mod smali;
 pub mod table;

@@ -5,7 +5,7 @@
 
 use crate::markup::{Element, Node, parse_xml};
 use crate::res::{self, Names};
-use crate::table::{Entry, EntryValue, Package, Span, StringPool, Table, Value, config};
+use crate::table::{EntryValue, Package, Span, StringPool, Table, Value, config};
 use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -697,12 +697,33 @@ fn apply_with(t: &mut Table, files: &BTreeMap<String, String>, keep: bool) -> Re
         types.extend(defined.iter().map(|r| r.ty.clone()));
         let mut seen: BTreeSet<u32> = BTreeSet::new();
         let index = Index::new(t.package(app).expect("the app package"));
+        // the configuration's values as they were, by ID, looked up once
+        let had: HashMap<u32, EntryValue> = {
+            let p = t.package(app).expect("the app package");
+            let mut had = HashMap::new();
+            for c in &p.chunks {
+                let crate::table::Chunk::Type(ty) = c else {
+                    continue;
+                };
+                if ty.config != at {
+                    continue;
+                }
+                for (i, e) in ty.entries.iter().enumerate() {
+                    if let Some(e) = e {
+                        had.insert(
+                            p.id << 24 | (ty.id as u32) << 16 | i as u32,
+                            e.value.clone(),
+                        );
+                    }
+                }
+            }
+            had
+        };
         for r in &defined {
             let p = t.package(app).expect("the app package");
             let id = index.ids.get(&(r.ty.clone(), r.name.clone())).copied();
-            let orig = id
-                .and_then(|id| p.get(id, &at))
-                .map(|e: &Entry| e.value.clone());
+            let orig = id.and_then(|id| had.get(&id)).cloned();
+            // a value new to this configuration: one of its others says what it is
             let orig = orig
                 .or_else(|| id.and_then(|id| p.values(id).next().map(|(_, e)| e.value.clone())));
             let v = value(r, orig.as_ref(), &index, &names, &mut t.strings, keep)
@@ -710,7 +731,7 @@ fn apply_with(t: &mut Table, files: &BTreeMap<String, String>, keep: bool) -> Re
             let p = t.package_mut(app).expect("the app package");
             let id = match id {
                 Some(id) => {
-                    if p.get(id, &at).map(|e| &e.value) != Some(&v) {
+                    if had.get(&id) != Some(&v) {
                         p.set(id, &at, v)?;
                     }
                     id
@@ -727,7 +748,6 @@ fn apply_with(t: &mut Table, files: &BTreeMap<String, String>, keep: bool) -> Re
         }
         // what the file no longer has; a file resource (a string naming a path under res/) is
         // the file's, not a values file's
-        let p = t.package(app).expect("the app package");
         let file = |v: &EntryValue| match v {
             EntryValue::Simple(Value {
                 ty: Value::STRING,
@@ -743,9 +763,7 @@ fn apply_with(t: &mut Table, files: &BTreeMap<String, String>, keep: bool) -> Re
             .ids
             .iter()
             .filter(|((ty, _), id)| {
-                types.contains(ty)
-                    && !seen.contains(id)
-                    && p.get(**id, &at).is_some_and(|e| !file(&e.value))
+                types.contains(ty) && !seen.contains(id) && had.get(*id).is_some_and(|v| !file(v))
             })
             .map(|(_, id)| *id)
             .collect();
@@ -847,7 +865,7 @@ mod tests {
 #[cfg(test)]
 mod edits {
     use super::*;
-    use crate::table::{Chunk, Spec, Type};
+    use crate::table::{Chunk, Entry, Spec, Type};
 
     fn pool(strings: &[&str]) -> StringPool {
         StringPool {

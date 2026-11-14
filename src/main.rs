@@ -69,8 +69,9 @@ Reverse engineering (Class = a.b.C, member = a.b.C#field or a.b.C#method()):
   apkscope comment   <apk> <Class|member> <text>
   apkscope map <apk> export <out.jobf|out.mapping>  |  map <apk> import <file>   JADX / Enigma names
 Editing: apkscope smali <apk> <Class>      editable smali of one class (edit, then build --smali)
+         apkscope res <apk> <out-dir>      the manifest and res/ as editable files (edit, then build --res)
          apkscope build <in.apk> <out.apk> [--put name=file]... [--delete name]... [--manifest x.xml]
-                  [--string name[@config]=value]... [--smali edited.smali]...
+                  [--res dir] [--string name[@config]=value]... [--smali edited.smali]...
                   [--key k.pk8 --cert c.crt | --no-sign]   a .jar is never signed
          apkscope verify <apk>
 Agents:  apkscope mcp                      MCP server over stdio (see README)
@@ -754,6 +755,47 @@ fn search_cmd(args: &[String], deobf: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// `apkscope res`: the manifest and `res/` of an APK as files, for `build --res`.
+fn res_cmd(apk: &str, out: &str) -> Result<(), String> {
+    let mut a = export::open(&session::prepare(apk)?)?;
+    let files = apkscope_core::resources::decode(&mut a)?;
+    for (path, data) in &files {
+        let to = std::path::Path::new(out).join(path);
+        if let Some(dir) = to.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::fs::write(&to, data).map_err(|e| format!("{}: {e}", to.display()))?;
+    }
+    eprintln!("wrote {} file(s) to {out}", files.len());
+    Ok(())
+}
+
+/// Every file under `dir`, by its path from there with `/` between names.
+fn read_tree(dir: &std::path::Path) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).map_err(|e| format!("{}: {e}", d.display()))? {
+            let path = e.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                todo.push(path);
+                continue;
+            }
+            let rel = path.strip_prefix(dir).map_err(|e| e.to_string())?;
+            let name = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            files.insert(
+                name,
+                std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+            );
+        }
+    }
+    Ok(files)
+}
+
 /// `apkscope build`: apply edits, zipalign, sign v2 + v3, then verify the result. `--no-sign`
 /// leaves the APK unsigned; a JAR never is signed, Android does not verify one.
 fn build_cmd(args: &[String]) -> Result<(), String> {
@@ -763,6 +805,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     let mut sign = true;
     let mut strings = std::collections::BTreeMap::new();
     let mut smali_srcs: Vec<String> = Vec::new();
+    let mut res_dir = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -778,6 +821,7 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
                 edits.insert(it.next().ok_or("--delete needs a name")?.clone(), None);
             }
             "--no-sign" => sign = false,
+            "--res" => res_dir = Some(it.next().ok_or("--res needs a directory")?.clone()),
             "--string" => {
                 let v = it.next().ok_or("--string needs name=value")?;
                 let (k, text) = v.split_once('=').ok_or("--string needs name=value")?;
@@ -818,6 +862,19 @@ fn build_cmd(args: &[String]) -> Result<(), String> {
     };
     let t = std::time::Instant::now();
     let src = session::prepare(input)?;
+    if res_dir.is_some() && (manifest.is_some() || !strings.is_empty()) {
+        return Err(
+            "--res has the manifest and the strings: not with --manifest or --string".into(),
+        );
+    }
+    if let Some(dir) = &res_dir {
+        // everything `apkscope res` wrote: a values file that is gone has no values
+        let files = read_tree(std::path::Path::new(dir))?;
+        let mut apk = export::open(&src)?;
+        let changed = apkscope_core::resources::edits(&mut apk, &files, true)?;
+        eprintln!("{} resource file(s) changed", changed.len());
+        edits.extend(changed);
+    }
     if let Some(m) = manifest {
         // text manifest -> binary XML, typed like the original
         let text = std::fs::read_to_string(&m).map_err(|e| format!("{m}: {e}"))?;
@@ -1163,6 +1220,7 @@ fn main() -> ExitCode {
             .map_err(String::from)
             .and_then(|t| emit(&t)),
         [cmd, path, out] if cmd == "export" => export_cmd(path, out, deobf),
+        [cmd, path, out] if cmd == "res" => res_cmd(path, out),
         [cmd, ..] if cmd == "search" => run_big_stack(|| search_cmd(&rest, deobf)),
         [cmd, ..] if cmd == "build" => build_cmd(&rest),
         [cmd, path] if cmd == "verify" => apksign::verify(path)
