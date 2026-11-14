@@ -15,19 +15,19 @@ fn past_end(o: usize) -> Error {
 fn u8_at(d: &[u8], o: usize) -> Result<u8> {
     d.get(o).copied().ok_or_else(|| past_end(o))
 }
-fn u16_at(d: &[u8], o: usize) -> Result<u16> {
+pub(crate) fn u16_at(d: &[u8], o: usize) -> Result<u16> {
     d.get(o..o + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .ok_or_else(|| past_end(o))
 }
-fn u32_at(d: &[u8], o: usize) -> Result<u32> {
+pub(crate) fn u32_at(d: &[u8], o: usize) -> Result<u32> {
     d.get(o..o + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .ok_or_else(|| past_end(o))
 }
 
 /// A chunk's type, header size and size, at `at`.
-fn chunk(d: &[u8], at: usize) -> Result<(u16, usize, usize)> {
+pub(crate) fn chunk(d: &[u8], at: usize) -> Result<(u16, usize, usize)> {
     let size = u32_at(d, at + 4)? as usize;
     if size < 8 || at + size > d.len() {
         return Err(Error::resources(format!("bad chunk size at {at:#x}")));

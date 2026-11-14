@@ -8,10 +8,10 @@ const RES_TABLE_PACKAGE: u16 = 0x0200;
 const RES_TABLE_TYPE: u16 = 0x0201;
 const RES_TABLE_TYPE_SPEC: u16 = 0x0202;
 
-fn u16(o: &mut Vec<u8>, v: u16) {
+pub(crate) fn u16(o: &mut Vec<u8>, v: u16) {
     o.extend_from_slice(&v.to_le_bytes());
 }
-fn u32(o: &mut Vec<u8>, v: u32) {
+pub(crate) fn u32(o: &mut Vec<u8>, v: u32) {
     o.extend_from_slice(&v.to_le_bytes());
 }
 fn pad4(o: &mut Vec<u8>) {
@@ -22,7 +22,7 @@ fn pad4(o: &mut Vec<u8>) {
 
 /// A chunk of `ty` with a header of `header` bytes, `body` writing everything after the
 /// type and sizes; its size is filled in when it is done.
-fn chunk(o: &mut Vec<u8>, ty: u16, header: u16, body: impl FnOnce(&mut Vec<u8>)) {
+pub(crate) fn chunk(o: &mut Vec<u8>, ty: u16, header: u16, body: impl FnOnce(&mut Vec<u8>)) {
     let start = o.len();
     u16(o, ty);
     u16(o, header);
@@ -81,7 +81,8 @@ fn cesu8(s: &str) -> Vec<u8> {
     out
 }
 
-fn pool(o: &mut Vec<u8>, p: &StringPool) {
+/// A string pool chunk: in a table, or in binary XML.
+pub(crate) fn pool(o: &mut Vec<u8>, p: &StringPool) {
     let mut data = Vec::new();
     let mut offsets = Vec::with_capacity(p.strings.len());
     for s in &p.strings {
