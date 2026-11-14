@@ -94,7 +94,7 @@ pub fn resource_names(p: &Package) -> BTreeMap<u32, (String, String)> {
 pub struct Names {
     map: HashMap<u32, (String, String)>,
     /// The package whose resources a reference names without a package.
-    app: u32,
+    pub(crate) app: u32,
 }
 
 impl Names {
@@ -136,6 +136,13 @@ impl Names {
             .iter()
             .find(|(_, v)| v.0 == ty && v.1 == name)
             .map(|(k, _)| *k)
+    }
+
+    /// Every resource named: ID, type, name.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, &str, &str)> {
+        self.map
+            .iter()
+            .map(|(id, (t, n))| (*id, t.as_str(), n.as_str()))
     }
 
     pub fn name(&self, id: u32) -> Option<&str> {
@@ -220,8 +227,9 @@ pub fn format_value(v: Value, strings: &[String], names: &Names) -> String {
         0x01 | 0x07 => names.reference(data, '@'),
         0x02 | 0x08 => names.reference(data, '?'),
         0x03 => strings.get(data as usize).cloned().unwrap_or_default(),
-        // the shortest text that reads back as the same float
-        0x04 => f32::from_bits(data).to_string(),
+        // the shortest text that reads back as the same float, with a point so that it reads
+        // back as a float: `1.0`, `-0.0`, `1.5e-6`
+        0x04 => format!("{:?}", f32::from_bits(data)),
         0x05 => complex(data, &DIMENSION_UNITS, 1.0),
         // fractions are stored as 0..1
         0x06 => complex(data, &FRACTION_UNITS, 0.01),
@@ -338,11 +346,9 @@ pub fn decode_xml(d: &[u8], names: Option<&Names>) -> R<String> {
 }
 
 /// Named constants of common framework attributes (`-2` -> `wrap_content`, `0x11` -> `center`).
-pub(crate) fn framework_constant(attr: &str, Value { ty, data }: Value) -> Option<String> {
-    if !(0x10..=0x11).contains(&ty) {
-        return None;
-    }
-    let enums: &[(u32, &str)] = match attr {
+/// The named values of common framework attributes that are enums.
+fn framework_enum(attr: &str) -> Option<&'static [(u32, &'static str)]> {
+    Some(match attr {
         "layout_width" | "layout_height" => {
             &[(0xffffffff, "match_parent"), (0xfffffffe, "wrap_content")]
         }
@@ -365,13 +371,76 @@ pub(crate) fn framework_constant(attr: &str, Value { ty, data }: Value) -> Optio
             (7, "centerInside"),
         ],
         "ellipsize" => &[(1, "start"), (2, "middle"), (3, "end"), (4, "marquee")],
-        "gravity" | "layout_gravity" | "foregroundGravity" => return Some(gravity(data)),
         _ => return None,
-    };
-    enums.iter().find(|e| e.0 == data).map(|e| e.1.to_string())
+    })
 }
 
+fn is_gravity(attr: &str) -> bool {
+    matches!(attr, "gravity" | "layout_gravity" | "foregroundGravity")
+}
+
+/// Gravity's flags by name, as `android.view.Gravity` has them.
+const GRAVITY: [(&str, u32); 14] = [
+    ("top", 0x30),
+    ("bottom", 0x50),
+    ("left", 0x03),
+    ("right", 0x05),
+    ("center_vertical", 0x10),
+    ("fill_vertical", 0x70),
+    ("center_horizontal", 0x01),
+    ("fill_horizontal", 0x07),
+    ("center", 0x11),
+    ("fill", 0x77),
+    ("clip_vertical", 0x80),
+    ("clip_horizontal", 0x08),
+    ("start", 0x0080_0003),
+    ("end", 0x0080_0005),
+];
+
+/// Named constants of common framework attributes (`-2` -> `wrap_content`, `0x11` -> `center`).
+pub(crate) fn framework_constant(attr: &str, Value { ty, data }: Value) -> Option<String> {
+    if !(0x10..=0x11).contains(&ty) {
+        return None;
+    }
+    if is_gravity(attr) {
+        return Some(gravity(data));
+    }
+    framework_enum(attr)?
+        .iter()
+        .find(|e| e.0 == data)
+        .map(|e| e.1.to_string())
+}
+
+/// The value a framework constant names: `wrap_content`, `center_vertical|start`.
+pub(crate) fn framework_constant_value(attr: &str, text: &str) -> Option<Value> {
+    if is_gravity(attr) {
+        let mut data = 0;
+        for f in text.split('|') {
+            data |= GRAVITY.iter().find(|g| g.0 == f.trim())?.1;
+        }
+        return Some(Value {
+            ty: Value::INT_HEX,
+            data,
+        });
+    }
+    let data = framework_enum(attr)?.iter().find(|e| e.1 == text)?.0;
+    Some(Value {
+        ty: Value::INT_DEC,
+        data,
+    })
+}
+
+/// Gravity's flags as names, or the number where names can't say it.
 fn gravity(g: u32) -> String {
+    let named = gravity_names(g);
+    let back = named
+        .split('|')
+        .filter_map(|n| GRAVITY.iter().find(|x| x.0 == n))
+        .fold(0, |a, x| a | x.1);
+    if back == g { named } else { format!("0x{g:x}") }
+}
+
+fn gravity_names(g: u32) -> String {
     // vertical bits 0x70, horizontal bits 0x07, 0x00800000 = relative (start/end)
     let (v, h, rel) = (g & 0x70, g & 0x07, g & 0x0080_0000 != 0);
     let mut out = Vec::new();

@@ -11,6 +11,7 @@ pub mod axml;
 pub mod bytecode;
 pub mod dex;
 mod error;
+mod markup;
 pub mod rebuild;
 pub mod res;
 pub mod sign;

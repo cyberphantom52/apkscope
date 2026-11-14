@@ -3,209 +3,11 @@
 //! quotes that keep whitespace, whitespace that collapses otherwise, and markup that becomes
 //! style spans.
 
+use crate::markup::{Element, Node, parse_xml};
 use crate::res::{self, Names};
 use crate::table::{Entry, EntryValue, Package, Span, StringPool, Table, Value, config};
 use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-// ---------- a small XML reader that keeps text as written ----------
-
-#[derive(Debug)]
-enum Node {
-    Element(Element),
-    Text(String),
-}
-
-#[derive(Debug)]
-struct Element {
-    name: String,
-    attrs: Vec<(String, String)>,
-    children: Vec<Node>,
-    line: usize,
-}
-
-impl Element {
-    fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
-    }
-
-    fn elements(&self) -> impl Iterator<Item = &Element> {
-        self.children.iter().filter_map(|n| match n {
-            Node::Element(e) => Some(e),
-            Node::Text(_) => None,
-        })
-    }
-
-    /// The text of its children, markup removed.
-    fn text(&self) -> String {
-        let mut s = String::new();
-        for n in &self.children {
-            match n {
-                Node::Text(t) => s.push_str(t),
-                Node::Element(e) => s.push_str(&e.text()),
-            }
-        }
-        s
-    }
-}
-
-fn entities(s: &str, line: usize) -> Result<String> {
-    if !s.contains('&') {
-        return Ok(s.to_owned());
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        let end = rest[i..]
-            .find(';')
-            .ok_or_else(|| Error::xml(format!("line {line}: `&` without `;`")))?;
-        let name = &rest[i + 1..i + end];
-        let c = match name {
-            "amp" => '&',
-            "lt" => '<',
-            "gt" => '>',
-            "quot" => '"',
-            "apos" => '\'',
-            _ => name
-                .strip_prefix("#x")
-                .map(|h| u32::from_str_radix(h, 16))
-                .or_else(|| name.strip_prefix('#').map(str::parse))
-                .and_then(|n| n.ok())
-                .and_then(char::from_u32)
-                .ok_or_else(|| Error::xml(format!("line {line}: unknown entity &{name};")))?,
-        };
-        out.push(c);
-        rest = &rest[i + end + 1..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-fn parse_xml(text: &str) -> Result<Element> {
-    let mut stack: Vec<Element> = vec![Element {
-        name: String::new(),
-        attrs: vec![],
-        children: vec![],
-        line: 0,
-    }];
-    let mut i = 0;
-    let line_at = |i: usize| text[..i].matches('\n').count() + 1;
-    let unterminated =
-        |what: &str, i: usize| Error::xml(format!("line {}: unterminated {what}", line_at(i)));
-    while i < text.len() {
-        let rest = &text[i..];
-        if let Some(r) = rest.strip_prefix("<!--") {
-            i += 4 + r.find("-->").ok_or_else(|| unterminated("comment", i))? + 3;
-        } else if let Some(r) = rest.strip_prefix("<![CDATA[") {
-            let end = r.find("]]>").ok_or_else(|| unterminated("CDATA", i))?;
-            let top = stack.last_mut().expect("the document");
-            top.children.push(Node::Text(r[..end].to_owned()));
-            i += 9 + end + 3;
-        } else if rest.starts_with("<?") || rest.starts_with("<!") {
-            i += rest
-                .find('>')
-                .ok_or_else(|| unterminated("declaration", i))?
-                + 1;
-        } else if let Some(r) = rest.strip_prefix("</") {
-            let end = r.find('>').ok_or_else(|| unterminated("end tag", i))?;
-            let name = r[..end].trim();
-            let e = stack.pop().filter(|e| e.name == name && !e.name.is_empty());
-            let e =
-                e.ok_or_else(|| Error::xml(format!("line {}: unexpected </{name}>", line_at(i))))?;
-            stack
-                .last_mut()
-                .expect("the document")
-                .children
-                .push(Node::Element(e));
-            i += 2 + end + 1;
-        } else if rest.starts_with('<') {
-            let line = line_at(i);
-            let mut j = 1;
-            let b = rest.as_bytes();
-            while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'>' && b[j] != b'/' {
-                j += 1;
-            }
-            let name = rest[1..j].to_owned();
-            let mut attrs = vec![];
-            loop {
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                match b.get(j) {
-                    None => return Err(unterminated(&format!("<{name}>"), i)),
-                    Some(b'>') => {
-                        stack.push(Element {
-                            name,
-                            attrs,
-                            children: vec![],
-                            line,
-                        });
-                        j += 1;
-                        break;
-                    }
-                    Some(b'/') => {
-                        let e = Element {
-                            name,
-                            attrs,
-                            children: vec![],
-                            line,
-                        };
-                        stack
-                            .last_mut()
-                            .expect("the document")
-                            .children
-                            .push(Node::Element(e));
-                        j += 2;
-                        break;
-                    }
-                    _ => {
-                        let eq = rest[j..]
-                            .find('=')
-                            .ok_or_else(|| unterminated("attribute", i))?;
-                        let key = rest[j..j + eq].trim().to_owned();
-                        let q = j
-                            + eq
-                            + 1
-                            + rest[j + eq + 1..]
-                                .find(['"', '\''])
-                                .ok_or_else(|| unterminated("attribute", i))?;
-                        let quote = b[q] as char;
-                        let end = q
-                            + 1
-                            + rest[q + 1..]
-                                .find(quote)
-                                .ok_or_else(|| unterminated("attribute", i))?;
-                        attrs.push((key, entities(&rest[q + 1..end], line)?));
-                        j = end + 1;
-                    }
-                }
-            }
-            i += j;
-        } else {
-            let end = rest.find('<').unwrap_or(rest.len());
-            let t = entities(&rest[..end], line_at(i))?;
-            stack
-                .last_mut()
-                .expect("the document")
-                .children
-                .push(Node::Text(t));
-            i += end;
-        }
-    }
-    let mut doc = stack
-        .pop()
-        .filter(|_| stack.is_empty())
-        .ok_or_else(|| Error::xml("an element is never closed"))?;
-    let root = doc.children.drain(..).find_map(|n| match n {
-        Node::Element(e) => Some(e),
-        Node::Text(_) => None,
-    });
-    root.ok_or_else(|| Error::xml("no root element"))
-}
 
 // ---------- strings, as aapt2 reads them ----------
 
@@ -383,12 +185,27 @@ impl StringPool {
 // ---------- typed values ----------
 
 /// Resources by type and name, in the app package and the framework.
-struct Index {
+pub(crate) struct Index {
     app: u32,
     ids: HashMap<(String, String), u32>,
 }
 
 impl Index {
+    /// What `names` names, the package that names resources without a package being `app`.
+    pub(crate) fn from_names(names: &Names) -> Index {
+        // a name two packages give, as framework-res's staged ones do, is the lowest ID's: the
+        // public one
+        let mut ids: HashMap<(String, String), u32> = HashMap::new();
+        for (id, t, n) in names.iter() {
+            let at = ids.entry((t.to_owned(), n.to_owned())).or_insert(id);
+            *at = (*at).min(id);
+        }
+        Index {
+            app: names.app,
+            ids,
+        }
+    }
+
     fn new(p: &Package) -> Index {
         let ids = res::resource_names(p)
             .into_iter()
@@ -398,7 +215,7 @@ impl Index {
     }
 
     /// `type/name`, `android:type/name`, or `0x7f010000`.
-    fn resolve(&self, body: &str, default_type: &str) -> Result<u32> {
+    pub(crate) fn resolve(&self, body: &str, default_type: &str) -> Result<u32> {
         let body = body.strip_prefix('+').unwrap_or(body);
         let (android, body) = match body.strip_prefix("android:") {
             Some(b) => (true, b),
@@ -428,12 +245,12 @@ impl Index {
 
 /// A value written as text, of the kind its element or type says: `@string/x`, `?attr/x`,
 /// `#ff0000`, `16dp`, `50%`, `true`, `12`, `0x1f`, `1.5`, or else a string.
-fn typed(
+pub(crate) fn typed(
     text: &str,
     kind: &str,
     index: &Index,
     pool: &mut StringPool,
-    e: &Element,
+    string: &mut dyn FnMut(&mut StringPool) -> Result<u32>,
 ) -> Result<Value> {
     let v = |ty, data| Ok(Value { ty, data });
     let t = text.trim();
@@ -508,13 +325,10 @@ fn typed(
             return v(Value::FLOAT, f.to_bits());
         }
         if matches!(kind, "bool" | "integer" | "color" | "dimen" | "fraction") {
-            return Err(Error::xml(format!(
-                "line {}: `{t}` is not a {kind}",
-                e.line
-            )));
+            return Err(Error::xml(format!("`{t}` is not a {kind}")));
         }
     }
-    v(Value::STRING, pool.intern_styled(&styled(e)?))
+    v(Value::STRING, string(pool)?)
 }
 
 // ---------- elements ----------
@@ -614,7 +428,9 @@ fn value(
                 return Ok(o);
             }
         }
-        typed(text, kind, index, pool, e)
+        typed(text, kind, index, pool, &mut |pool| {
+            Ok(pool.intern_styled(&styled(e)?))
+        })
     };
     let orig_simple = match orig {
         Some(EntryValue::Simple(v)) => Some(*v),
